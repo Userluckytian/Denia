@@ -16,18 +16,19 @@ export function isTransientEvent(envelope: SessionEnvelope): boolean {
 }
 
 export function appendSessionEvents(events: SessionEnvelope[], batch: SessionEnvelope[]): void {
-  const settled = new Map<string, number>()
-  const closedTurns = new Map<number, number>()
+  let settled: Map<string, number> | undefined
+  let closedTurns: Map<number, number> | undefined
+  let answeredSomething = false
   for (const envelope of batch) {
     events.push(envelope)
-    if (envelope.type === 'assistant-message') settled.set(`${envelope.turn}:${envelope.step}`, envelope.seq)
-    if (envelope.type === 'turn-end') closedTurns.set(envelope.turn, envelope.seq)
+    if (envelope.type === 'assistant-message') (settled ??= new Map()).set(`${envelope.turn}:${envelope.step}`, envelope.seq)
+    if (envelope.type === 'turn-end') (closedTurns ??= new Map()).set(envelope.turn, envelope.seq)
+    if (envelope.type === 'tool-result') answeredSomething = true
   }
   // 清扫判据只看**本批**:每帧都全量过一遍缓冲会把实时流的每帧成本从
   // O(1) 拉到 O(n),长会话越跑越卡。工具结果到达是唯一需要额外触发清扫的
   // 事件(它让对应的实时输出增量作废)。
-  const answeredSomething = batch.some((envelope) => envelope.type === 'tool-result')
-  if (closedTurns.size === 0 && settled.size === 0 && !answeredSomething) return
+  if (!closedTurns && !settled && !answeredSomething) return
   // 清扫对象取自整份缓冲(这一遍本来就是全量):增量的有效窗口是
   // tool-call → tool-result,此刻缓冲里凡是已有结果的调用,其实时增量
   // 都不再有意义 —— 正文以结果为准。
@@ -38,8 +39,8 @@ export function appendSessionEvents(events: SessionEnvelope[], batch: SessionEnv
   let writeIndex = 0
   for (const envelope of events) {
     if (envelope.type === 'assistant-chunk' &&
-      (envelope.seq < (closedTurns.get(envelope.turn) ?? 0) ||
-        envelope.seq < (settled.get(`${envelope.turn}:${envelope.step}`) ?? 0))) continue
+      (envelope.seq < (closedTurns?.get(envelope.turn) ?? 0) ||
+        envelope.seq < (settled?.get(`${envelope.turn}:${envelope.step}`) ?? 0))) continue
     if (envelope.type === 'tool-output-chunk' && answered.has(envelope.call_id)) continue
     events[writeIndex++] = envelope
   }

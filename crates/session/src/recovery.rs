@@ -292,6 +292,7 @@ impl Session {
             // 热态的事件内存近似 = 驻留各行的字节之和(与 append 同口径)。
             resident_bytes,
             transient_bytes: 0,
+            transient_start: None,
             first_prompt_excerpt,
             history_projection: None,
         };

@@ -704,7 +704,7 @@ let incrementalParentSessionId: string | undefined
 /**
  * Incremental fold: applies one envelope to an existing node list without
  * refolding the prefix. Only the affected tail node is copied, so a live
- * stream costs O(1) per envelope instead of O(n).
+ * stream avoids refolding the prefix (the node array is still copied).
  */
 export function applyEnvelope(
   nodes: TranscriptNode[],
@@ -724,6 +724,8 @@ export function applyEnvelope(
  * `blocks` 缓冲,中途完全不动节点数组;遇到非 chunk 事件(settle/
  * turn-end/工具调用等)或帧末,才把缓冲一次 flush 成新数组。连续 chunk
  * 的数组复制从每帧 m 次降到 1 次,语义与 `applyEnvelope` 逐条应用完全一致。
+ * 连续工具输出同样只复制一次节点数组,按 callId 索引定位,每条工具行
+ * 首次写入时复制;旧快照的节点和 live 对象保持不变。
  */
 export function applyEnvelopes(
   nodes: TranscriptNode[],
@@ -738,6 +740,9 @@ export function applyEnvelopes(
     blocks: UiBlock[]
   }
   let acc: Accum | null = null
+  let toolIndices: Map<string, number> | null = null
+  let toolSearchIndex = -1
+  let copiedTools: Set<number> | null = null
   const flush = (): Extract<TranscriptNode, { kind: 'assistant' }> | null => {
     if (acc === null) return null
     const settled = { ...acc.node, blocks: acc.blocks }
@@ -747,6 +752,37 @@ export function applyEnvelopes(
     return settled
   }
   for (const event of events) {
+    if (event.type === 'tool-output-chunk') {
+      if (acc !== null) flush()
+      if (toolIndices === null) {
+        toolIndices = new Map()
+        toolSearchIndex = current.length - 1
+      }
+      while (!toolIndices.has(event.call_id) && toolSearchIndex >= 0) {
+        const node = current[toolSearchIndex]
+        if (node.kind === 'tool' && !toolIndices.has(node.callId)) {
+          toolIndices.set(node.callId, toolSearchIndex)
+        }
+        toolSearchIndex--
+      }
+      const index = toolIndices.get(event.call_id)
+      if (index === undefined) continue
+      const node = current[index]
+      if (node.kind !== 'tool' || node.result) continue
+      if (copiedTools === null) {
+        current = current.slice()
+        copiedTools = new Set()
+      }
+      if (!copiedTools.has(index)) {
+        current[index] = { ...node, live: node.live ? { ...node.live } : undefined }
+        copiedTools.add(index)
+      }
+      appendLive(current[index] as Extract<TranscriptNode, { kind: 'tool' }>, event.stream, event.text)
+      continue
+    }
+    // 非输出事件可能插入工具行或结算结果,下次输出必须重建索引。
+    toolIndices = null
+    copiedTools = null
     if (event.type === 'assistant-chunk') {
       const last = current[current.length - 1]
       if (

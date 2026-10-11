@@ -118,6 +118,7 @@ function disposeState(state: StreamState) {
   clearTimers(state)
   state.controller?.abort()
   state.controller = null
+  state.listeners.clear()
 }
 
 function clearTimers(state: StreamState) {
@@ -366,11 +367,10 @@ export function attach(id: string, listener: SessionStreamListener): () => void 
   state.listeners.add(listener)
   reconnect(id, state)
   return () => {
-    const current = streams.get(id)
-    if (!current) return
-    current.listeners.delete(listener)
+    if (streams.get(id) !== state) return
+    state.listeners.delete(listener)
     // 无人查看即断开:no 后台保活,连接预算恒定。
-    if (current.listeners.size === 0) disposeState(current)
+    if (state.listeners.size === 0) disposeState(state)
   }
 }
 
@@ -398,12 +398,7 @@ export function invalidateSession(id: string): void {
 
 /** 引擎全量清理(仅测试/应用卸载)。 */
 export function resetEngine(): void {
-  for (const state of streams.values()) {
-    state.dead = true
-    clearTimers(state)
-    state.controller?.abort()
-  }
-  streams.clear()
+  for (const state of streams.values()) disposeState(state)
 }
 
 /** 供测试使用:当前持流会话数。 */

@@ -52,14 +52,14 @@ export function useTypewriter(
   const shownRef = useRef(0)
   // 上一帧的目标文本(判定 append / 重置)。
   const targetRef = useRef<string | null>(null)
-  const [shown, setShown] = useState(() => (streaming ? '' : text))
+  const [shown, setShown] = useState(() => (streaming ? 0 : text.length))
 
   useEffect(() => {
     if (!streaming) {
       // settle / 非流式:立即补齐,不播尾巴。
       shownRef.current = text.length
       targetRef.current = null
-      setShown(text)
+      setShown(text.length)
       return
     }
     const last = targetRef.current
@@ -68,6 +68,7 @@ export function useTypewriter(
     } else {
       // 首帧或目标非 append(重试/切消息):从头播。
       shownRef.current = 0
+      setShown(0)
     }
     if (shownRef.current > text.length) shownRef.current = text.length
     targetRef.current = text
@@ -91,7 +92,7 @@ export function useTypewriter(
         next = text.length
       }
       shownRef.current = next
-      setShown(safeSlice(text, next))
+      setShown(Math.floor(next))
       lastAt = now
       if (next < text.length) raf = requestAnimationFrame(tick)
     }
@@ -103,7 +104,9 @@ export function useTypewriter(
     }
   }, [text, streaming, follow])
 
-  return shown
+  if (!streaming) return text
+  const target = targetRef.current
+  return target !== null && text.startsWith(target) ? safeSlice(text, shown) : ''
 }
 
 /**

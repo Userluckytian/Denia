@@ -4,6 +4,7 @@ import {
   getHighlightModule, highlightRevision, subscribeHighlightLoaded,
 } from './highlightLoader'
 import type { HighlightSpan, StreamingHighlightSession } from './highlight'
+import { withinHighlightBudget } from './highlightBudget'
 
 export interface CodeBlockProps {
   /** The source text, rendered verbatim (trailing newline trimmed for display). */
@@ -47,17 +48,18 @@ export function CodeBlock({ code, lang, streaming, copyLabel, copiedLabel }: Cod
   const trimmed = code.endsWith('\n') ? code.slice(0, -1) : code
   // Re-render when a lazy grammar finishes loading, so a fence that showed plain
   // text while its language's grammar imported picks up highlighting.
+  const highlightable = useMemo(() => withinHighlightBudget(trimmed), [trimmed])
   const loaded = useSyncExternalStore(subscribeHighlightLoaded, highlightRevision, highlightRevision)
   const html = useMemo(
-    () => (streaming === true ? undefined : getHighlightModule(lang)?.highlightToHtml(trimmed, lang)),
-    [streaming, trimmed, lang, loaded],
+    () => (streaming === true || !highlightable ? undefined : getHighlightModule(lang)?.highlightToHtml(trimmed, lang)),
+    [streaming, trimmed, lang, loaded, highlightable],
   )
   // Streaming state lives in refs mutated inside the memo: the session's caches
   // carry across chunks only because the owner keys this instance stably.
   const sessionRef = useRef<StreamingHighlightSession | null>(null)
   const lineCacheRef = useRef<{ lines: readonly HighlightSpan[][]; elements: ReactNode[] } | null>(null)
   const streamedBody = useMemo(() => {
-    if (streaming !== true) {
+    if (streaming !== true || !highlightable) {
       sessionRef.current = null
       lineCacheRef.current = null
       return undefined
@@ -89,7 +91,7 @@ export function CodeBlock({ code, lang, streaming, copyLabel, copiedLabel }: Cod
       ))
     lineCacheRef.current = { lines, elements }
     return <pre {...SHIKI_PRE_PROPS}><code>{elements}</code></pre>
-  }, [streaming, trimmed, lang, loaded])
+  }, [streaming, trimmed, lang, loaded, highlightable])
   const rootRef = useRef<HTMLDivElement>(null)
   const [copied, setCopied] = useState(false)
 

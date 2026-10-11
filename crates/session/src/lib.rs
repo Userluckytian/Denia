@@ -198,6 +198,8 @@ struct SessionInner {
     resident_bytes: u64,
     /// 其中属于 transient(chunk)的部分;`turn-end` 清扫时按此扣减。
     transient_bytes: u64,
+    /// 首个未结算 chunk 的下标;此前的历史无需参与清扫。
+    transient_start: Option<usize>,
     first_prompt_excerpt: Option<String>,
     /// 旧子代理的模型历史投影（计划 9.4）；非旧 child 恒为 None。
     ///
@@ -367,6 +369,7 @@ impl Session {
         inner.derived_surface = None;
         inner.resident_bytes = 0;
         inner.transient_bytes = 0;
+        inner.transient_start = None;
         inner.cold = true;
         Ok(true)
     }
@@ -1979,6 +1982,116 @@ mod tests {
     }
 
     #[test]
+    fn settlement_only_scans_transient_suffix_and_preserves_history() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = Session::create(&root.join("s"), "s".into(), &cwd, true, None).unwrap();
+        for step in 0..4096 {
+            session
+                .append(SessionEvent::StepStart { turn: 1, step })
+                .unwrap();
+        }
+        let prefix = session.events();
+        {
+            let mut inner = session.inner.lock().unwrap();
+            inner.events.reserve(128);
+        }
+        let capacity = session.inner.lock().unwrap().events.capacity();
+        for turn in 1..=3 {
+            session.append(SessionEvent::TurnStart { turn }).unwrap();
+            if turn != 1 {
+                let start = session.events().len();
+                for step in 1..=3 {
+                    session
+                        .append(SessionEvent::AssistantChunk {
+                            turn,
+                            step,
+                            chunk: denia_core::stream::StreamChunk::TextDelta {
+                                index: 0,
+                                text: "delta".into(),
+                            },
+                        })
+                        .unwrap();
+                    // 非 transient 事件可与 chunk 交错,清扫不得误删。
+                    session
+                        .append(SessionEvent::StepEnd { turn, step })
+                        .unwrap();
+                }
+                assert_eq!(session.inner.lock().unwrap().transient_start, Some(start));
+            }
+            session
+                .append(SessionEvent::TurnEnd {
+                    turn,
+                    reason: TurnEndReason::Completed,
+                })
+                .unwrap();
+            let inner = session.inner.lock().unwrap();
+            assert_eq!(inner.transient_start, None);
+            assert_eq!(inner.transient_bytes, 0);
+            assert_eq!(inner.events.capacity(), capacity);
+            assert!(inner.events.iter().all(|e| !is_transient_event(&e.event)));
+        }
+        let events = session.events();
+        assert_eq!(
+            serde_json::to_value(&events[..prefix.len()]).unwrap(),
+            serde_json::to_value(&prefix).unwrap()
+        );
+        assert_eq!(events.len(), 4096 + 6 + 6);
+        let recovered = Session::load(session.file()).unwrap();
+        assert_eq!(
+            serde_json::to_value(recovered.events()).unwrap(),
+            serde_json::to_value(&events).unwrap()
+        );
+        assert_eq!(recovered.inner.lock().unwrap().transient_start, None);
+        let point = recovered
+            .append(SessionEvent::UserMessage {
+                text: "rewind point".into(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
+        recovered
+            .append(SessionEvent::AssistantChunk {
+                turn: 4,
+                step: 1,
+                chunk: denia_core::stream::StreamChunk::TextDelta {
+                    index: 0,
+                    text: "discard".into(),
+                },
+            })
+            .unwrap();
+        recovered.rewind(point.seq).unwrap();
+        assert_eq!(recovered.inner.lock().unwrap().transient_start, None);
+        recovered
+            .append(SessionEvent::AssistantChunk {
+                turn: 4,
+                step: 1,
+                chunk: denia_core::stream::StreamChunk::TextDelta {
+                    index: 0,
+                    text: "new".into(),
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            recovered.inner.lock().unwrap().transient_start,
+            Some(events.len())
+        );
+        recovered
+            .append(SessionEvent::TurnEnd {
+                turn: 4,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        assert_eq!(recovered.events().len(), events.len() + 1);
+        assert!(recovered.cool().unwrap());
+        recovered.ensure_hot().unwrap();
+        assert_eq!(recovered.inner.lock().unwrap().transient_start, None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn settled_step_releases_chunks_before_turn_end() {
         let root = temp_root();
         let cwd = root.join("work");
@@ -2014,7 +2127,8 @@ mod tests {
         assert_eq!(session.events().len(), 2);
         let inner = session.inner.lock().unwrap();
         assert_eq!(inner.transient_bytes, 0);
-        assert_eq!(inner.events.capacity(), 2);
+        assert_eq!(inner.transient_start, None);
+        assert!(inner.events.capacity() <= 64);
         drop(inner);
         assert!(!session.cool().unwrap());
         session

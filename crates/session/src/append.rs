@@ -143,6 +143,9 @@ impl Session {
 
         // 当前步骤的 chunk 支持实时回放;消息结算或轮次闭合后只保留终稿。
         let line_bytes = line.len() as u64 + 1;
+        if transient && inner.transient_start.is_none() {
+            inner.transient_start = Some(inner.events.len());
+        }
         inner.events.push(envelope.clone());
         inner.resident_bytes += line_bytes;
         if transient {
@@ -152,8 +155,18 @@ impl Session {
             &envelope.event,
             SessionEvent::AssistantMessage { .. } | SessionEvent::TurnEnd { .. }
         ) {
-            inner.events.retain(|item| !is_transient_event(&item.event));
-            inner.events.shrink_to_fit();
+            if let Some(start) = inner.transient_start.take() {
+                // 已结算前缀没有 chunk,只扫描本次流式输出的后缀。
+                inner
+                    .events
+                    .extract_if(start.., |item| is_transient_event(&item.event))
+                    .for_each(drop);
+                // 大段流式输出释放多余槽位,普通结算保留增长余量以免反复搬运历史。
+                let len = inner.events.len();
+                if inner.events.capacity() > len.saturating_mul(4).max(64) {
+                    inner.events.shrink_to(len.saturating_mul(2).max(64));
+                }
+            }
             // 清扫的正是本轮的 chunk,按记账扣减(饱和,防历史回退遗留的偏差)。
             inner.resident_bytes = inner.resident_bytes.saturating_sub(inner.transient_bytes);
             inner.transient_bytes = 0;

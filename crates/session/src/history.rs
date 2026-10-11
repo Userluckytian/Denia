@@ -308,6 +308,10 @@ impl Session {
                 .saturating_sub(inner.base_offset)
         };
         inner.transient_bytes = 0;
+        inner.transient_start = inner
+            .events
+            .iter()
+            .position(|item| is_transient_event(&item.event));
         // 派生面缓存随截断作废(版本号自增,即使截断后长度恰好等于某个
         // 旧缓存时的长度,也不会误命中)。
         inner.derived_surface = None;
