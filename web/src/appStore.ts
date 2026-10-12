@@ -378,7 +378,7 @@ export function getActiveWorkspace(): WorkspaceRecord | null {
  * 发送前确保会话存在:复用 activeId → 复用该工作区空白会话 → 创建。
  * 返回会话 id;无工作区时返回 null。
  */
-export async function ensureSession(ws: WorkspaceRecord | null): Promise<string | null> {
+export async function ensureSession(ws: WorkspaceRecord | null, activate = true): Promise<string | null> {
   // activeId 可能悬空(会话被别的页面/实例删掉,而本页面焦点还没跟上)。
   // 直接拿它去 postPrompt 会报 `session not found`,所以先校验它确实还在
   // 列表里;列表尚未加载完时不做校验,避免误判。
@@ -390,7 +390,7 @@ export async function ensureSession(ws: WorkspaceRecord | null): Promise<string 
   if (!ws) return null
   const blank = findWorkspaceBlank(ws.path)
   if (blank) {
-    setActiveId(blank.id, ws.id)
+    if (activate) setActiveId(blank.id, ws.id)
     return blank.id
   }
   const { session } = await api.createSession({ workspaceId: ws.id })
@@ -409,7 +409,7 @@ export async function ensureSession(ws: WorkspaceRecord | null): Promise<string 
   addSessionLocal(summary, ws.id)
   // 本页面为发送首条消息而创建的会话:同样登记,发送失败留下空白时可被清理。
   markLocalBlank(summary.id)
-  setActiveId(summary.id, ws.id)
+  if (activate) setActiveId(summary.id, ws.id)
   return summary.id
 }
 

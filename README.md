@@ -62,6 +62,20 @@ those records with:
 The bindings feature is optional and adds no dependency to ordinary core builds.
 The generator's `--check` mode verifies committed TypeScript is current.
 
+## Desktop releases
+
+The **Desktop release** GitHub Actions workflow runs only through **Actions →
+Desktop release → Run workflow**. Select the source branch, optionally enter a
+new tag (for example `v0.1.0`), and choose whether to mark it as a prerelease.
+With no tag, it generates `desktop-<run number>-<attempt>`. Existing tags are
+rejected to avoid replacing published builds.
+
+It tests and builds the frontend, embeds it into the Windows x64 desktop binary,
+and publishes a portable ZIP plus `SHA256SUMS.txt` to GitHub Releases. Release
+creation targets the exact selected commit. No signing secrets are required;
+the executable is unsigned and requires Microsoft Edge WebView2 Runtime.
+Pushing commits or tags does not trigger this workflow.
+
 ## Test gateway
 
 `node scripts/mock-gateway.mjs` starts a local OpenAI-compatible gateway on

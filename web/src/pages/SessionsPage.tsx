@@ -1,3 +1,6 @@
+import { useComposerPersistence } from '../features/conversation/useComposerPersistence'
+import { useInputHistory } from '../features/conversation/useInputHistory'
+import { saveComposer, type ComposerSnapshot } from '../composerMemory'
 import { useSessionContext } from '../features/conversation/useSessionContext'
 import { useComposerMentions } from '../features/conversation/useComposerMentions';
 import { useComposerSlash } from '../features/conversation/useComposerSlash';
@@ -5,6 +8,7 @@ import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTT
 import { RuntimePanel } from '../components/RuntimePanel';
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent } from 'react';
 import * as api from '../api';
+import { flushSync } from 'react-dom'
 
 import type { ApprovalDecisionPayload } from '../api';
 import { optimizePromptText } from '../promptOptimizer';
@@ -180,7 +184,6 @@ export default function SessionsPage({
   const [goalView, setGoalView] = useState<api.GoalView | null>(null)
   // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送。
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
-  const queueSeqRef = useRef(0)
   // 会话内容视图(dsh conversation.view 环):对话 / 轨迹。组件按
   // activeId 重挂(key),视图状态随会话切换自然复位。
   const [view, setView] = useState<'chat' | 'trajectory'>('chat')
@@ -221,11 +224,13 @@ export default function SessionsPage({
 
   const inert = !activeId && !activeWs
   const composingRef = useRef(false)
+  const inputHistory = useInputHistory({ sessionId: activeId })
   const onDraftChange = useCallback((text: string) => {
+    inputHistory.resetBrowse()
     setPrompt(text)
     setOptimizedPrompt(null)
     originalPromptRef.current = ''
-  }, [])
+  }, [inputHistory.resetBrowse])
   const contextWorkspacePath = activeId ? activeSession?.cwd ?? null : activeWs?.path ?? null
   const mentionCwd = activeSession?.cwd_alive === false ? null : contextWorkspacePath
   const { mentionOpen, mentionItems, mentionLoading, mentionQuery, mentionActive, setMentionActive,
@@ -295,7 +300,7 @@ export default function SessionsPage({
     refreshGoal(activeId)
   }, [activeId, refreshGoal])
 
-  // 会话切换:清空上一会话的草稿与派生视图状态。
+  // 会话切换仅复位派生视图；草稿和队列由持久化通道恢复。
   //
   // 依赖只挂 activeId —— 这是一次"换会话"的复位,不是"回调换了个引用"的
   // 复位。closeMention / resetFollow 走 ref 转发:它们挂在别的 hook 上,
@@ -314,7 +319,6 @@ export default function SessionsPage({
     setOptimizing(false)
     setOptimizedPrompt(null)
     originalPromptRef.current = ''
-    applyDraft('')
     setSending(false)
     setPendingMessages([])
     sendingRef.current = false
@@ -328,8 +332,6 @@ export default function SessionsPage({
     setAxisAnchors([])
     setAxisJump(null)
     setTodos([])
-    setQueuedMessages([])
-    queueSeqRef.current = 0
     // 新会话从顶部开始且重新吸底:复位归属,不写 DOM(scrollTop 归零)。
     resetFollowRef.current()
     const el = scrollRef.current
@@ -445,6 +447,29 @@ export default function SessionsPage({
   const [attachments, setAttachments] = useState<{ name: string; mime: string; file: File }[]>([])
   // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
+  const composerScope = activeId ? `session:${activeId}` : `workspace:${activeWs?.path ?? ''}`
+  const composerSnapshot = useMemo<ComposerSnapshot>(() => ({
+    text: prompt, images: pastedImages, attachments, quotes: trajQuotes, queue: queuedMessages,
+  }), [prompt, pastedImages, attachments, trajQuotes, queuedMessages])
+  const composerSnapshotRef = useRef(composerSnapshot)
+  composerSnapshotRef.current = composerSnapshot
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const { ready: composerReady, flush: flushComposer } = useComposerPersistence({
+    scope: composerScope,
+    snapshot: composerSnapshot,
+    restore: (saved) => {
+      applyDraft(saved.text)
+      setPastedImages(saved.images)
+      setAttachments(saved.attachments)
+      setTrajQuotes(saved.quotes)
+      setQueuedMessages(saved.queue)
+    },
+    onError: (message) => notify('err', message),
+  })
   const promptEmpty =
     !prompt.trim() &&
     pastedImages.length === 0 &&
@@ -1218,6 +1243,7 @@ export default function SessionsPage({
         return
       }
       const result = await api.rewindSession(activeId, rewindReq.seq)
+      void inputHistory.refresh()
       // 后端物理截断后事件 seq 重新编号,本页流引擎的 cursor 与 follow
       // 连接已失真:显式重连对齐(重拉快照校正 cursor、按需重开 follow),
       // 不依赖 SessionView 重挂载这类间接效应——否则快照竞态失败或另一
@@ -1286,11 +1312,10 @@ export default function SessionsPage({
    * 整体搬进队列,输入区随之下空,本轮结束后自动发送。
    */
   const enqueueMessage = (text: string) => {
-    queueSeqRef.current += 1
     setQueuedMessages((previous) => [
       ...previous,
       {
-        id: `queue-${queueSeqRef.current}`,
+        id: `queue-${crypto.randomUUID()}`,
         text,
         images: pastedImages.length > 0 ? pastedImages : undefined,
         attachments: attachments.length > 0 ? attachments : undefined,
@@ -1350,7 +1375,7 @@ export default function SessionsPage({
     text: string,
     options?: { clearInput?: boolean; payload?: OutgoingPayload },
   ): Promise<boolean> => {
-    if (sendingRef.current) return false
+    if (sendingRef.current || !composerReady) return false
     // 载荷:显式传入优先(队列消息),否则取输入区当前内容。
     const outgoingImages = options?.payload?.images ?? pastedImages
     const outgoingAttachments = options?.payload?.attachments ?? attachments
@@ -1374,10 +1399,13 @@ export default function SessionsPage({
     sendingRef.current = true
     setSending(true)
     let ok = false
+    let createdId: string | null = null
     try {
       // 从欢迎页发首条消息时,活动会话尚未创建;把当前选择的权限带到新会话。
       const wasHero = !activeId
-      const id = await ensureSession(activeWs)
+      await flushComposer()
+      const id = activeId ?? await ensureSession(activeWs, false)
+      if (!activeId) createdId = id
       if (!id) {
         onOpenPicker()
         return false
@@ -1413,6 +1441,7 @@ export default function SessionsPage({
         if (!rest) {
           // 裸 /plan:只切模式,不发消息;手动发送时清空输入区(队列刷新不清)。
           if (options?.clearInput !== false) clearComposerState()
+          ok = true
           return true
         }
         body = rest
@@ -1420,6 +1449,7 @@ export default function SessionsPage({
         if ((command.rest ?? '').trim()) throw new Error(t('slashCompactNoArgs'))
         await runCompact(id)
         if (options?.clearInput !== false) clearComposerState()
+        ok = true
         return true // 裸 /compact:直接压缩,不发消息
       } else if (command?.kind === 'goal') {
         // /goal [<objective>|edit <objective>|pause|resume|clear](对照 dsh /goal 命令语法)
@@ -1452,6 +1482,7 @@ export default function SessionsPage({
           notify('err', error instanceof Error ? error.message : String(error))
         }
         if (options?.clearInput !== false) clearComposerState()
+        ok = true
         return true // /goal 系列都是本地命令,不发消息
       }
       // 技能直调:首行裸 /name 由后端 skill_gesture 注入(collectSkillTokens
@@ -1490,6 +1521,7 @@ export default function SessionsPage({
       })
       // 发送成功后立即打开 follow,收流式增量;不要等 running SSE 才建连。
       ensureFollowing(id)
+      void inputHistory.refresh()
       const sentImages: UserMessageImage[] = outgoingImages.map(({ mime, data }) => ({ mime, data }))
       // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
       pushPending(body, sentImages.length > 0 ? sentImages : undefined)
@@ -1503,6 +1535,21 @@ export default function SessionsPage({
       notify('err', error instanceof Error ? error.message : String(error))
       // 保留输入框内容;若会话侧已经创建但发送失败,等待用户重试。
     } finally {
+      if (createdId) {
+        try {
+          const empty: ComposerSnapshot = { text: '', images: [], attachments: [], quotes: [], queue: [] }
+          const retained = ok ? empty : composerSnapshotRef.current
+          await saveComposer(`session:${createdId}`, retained)
+          if (mountedRef.current) {
+            flushSync(() => clearComposerState())
+            await flushComposer()
+          }
+          await saveComposer(composerScope, empty)
+          if (mountedRef.current) setActiveId(createdId, activeWs?.id)
+        } catch (error) { notify('err', String(error)) }
+      } else if (ok && options?.clearInput !== false && !mountedRef.current) {
+        await saveComposer(composerScope, { ...composerSnapshotRef.current, text: '', images: [], attachments: [], quotes: [] })
+      }
       sendingRef.current = false
       setSending(false)
     }
@@ -1515,7 +1562,7 @@ export default function SessionsPage({
     // postMessage 在发往后端前兜底成一句话,队列里保留用户真实输入)。
     const hasPayload =
       pastedImages.length > 0 || attachments.length > 0 || trajQuotes.length > 0
-    if (optimizing || (!trimmed && !hasPayload) || sendingRef.current) return
+    if (!composerReady || optimizing || (!trimmed && !hasPayload) || sendingRef.current) return
     if (inert) {
       onOpenPicker()
       return
@@ -1547,16 +1594,17 @@ export default function SessionsPage({
   useEffect(() => {
     const prev = prevRunningRef.current
     prevRunningRef.current = running
-    if (prev && !running && !suppressAutoFlushRef.current) {
+    if (composerReady && prev && !running && !suppressAutoFlushRef.current) {
       const next = queuedMessagesRef.current[0]
       if (next) {
-        setQueuedMessages((previous) => previous.slice(1))
         void postMessageRef
           .current(next.text, { clearInput: false, payload: queuedPayload(next) })
           .then((ok) => {
-            if (!ok) {
-              // 发送失败:放回队首,等用户处理(不丢消息)。
-              setQueuedMessages((previous) => [{ ...next }, ...previous])
+            if (ok) {
+              setQueuedMessages((previous) => previous.filter((item) => item.id !== next.id))
+              void saveComposer(composerScope, { ...composerSnapshotRef.current,
+                queue: composerSnapshotRef.current.queue.filter((item) => item.id !== next.id),
+              }).catch((error) => notify('err', String(error)))
             }
           })
       }
@@ -1578,6 +1626,7 @@ export default function SessionsPage({
   /** 立即发送:先打断当前 AI,再直接发送这条队列消息。 */
   const sendNow = async (message: QueuedMessage) => {
     if (!activeId) return
+    const sendQueuedMessage = postMessage
     suppressAutoFlushRef.current = true
     try {
       await api.cancelSession(activeId)
@@ -1595,16 +1644,18 @@ export default function SessionsPage({
       notify('err', t('queueSendFailed'))
       return
     }
-    // 打断成功:移出队列并发送(携带入队时的图片/附件/引用)。
-    setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
+    if (!mountedRef.current) { suppressAutoFlushRef.current = false; return }
+    // 收到服务端确认后才出队，切换或刷新不会丢失待发送消息。
     try {
-      const ok = await postMessageRef.current(message.text, {
+      const ok = await sendQueuedMessage(message.text, {
         clearInput: false,
         payload: queuedPayload(message),
       })
-      if (!ok) {
-        // 发送失败:放回队列(保持原位置),不丢消息。
-        setQueuedMessages((previous) => [message, ...previous])
+      if (ok) {
+        setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
+        await saveComposer(composerScope, { ...composerSnapshotRef.current,
+          queue: composerSnapshotRef.current.queue.filter((item) => item.id !== message.id),
+        })
       }
     } finally {
       suppressAutoFlushRef.current = false
@@ -1685,6 +1736,26 @@ export default function SessionsPage({
     // 卡片原子性(contenteditable=false)由浏览器原生保证:光标进不去、
     // Backspace/Delete/选择删除均整卡处理,无需任何拦截。
     if (composingRef.current || event.nativeEvent.isComposing) return
+    if (!mentionOpen && !slashOpen && !optimizing && composerReady
+      && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+      && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+      const editor = promptRef.current
+      const range = editor ? selectionOffsetsIn(editor) : null
+      if (editor && range && range.start === range.end) {
+        const current = serializeEditor(editor)
+        const up = event.key === 'ArrowUp'
+        const boundary = up ? !current.slice(0, range.start).includes('\n') : !current.slice(range.end).includes('\n')
+        if (boundary) {
+          const text = inputHistory.navigate(up ? 'up' : 'down', current)
+          if (text !== null) {
+            event.preventDefault()
+            applyDraft(text)
+            setCaretOffset(editor, up ? 0 : text.length)
+            return
+          }
+        }
+      }
+    }
     if (event.key !== 'Enter' || event.shiftKey) return
     event.preventDefault()
     if (optimizing) return
@@ -1837,12 +1908,12 @@ export default function SessionsPage({
         <div
           ref={promptRef}
           className="prompt-editor"
-          contentEditable={!inert && !optimizing}
+          contentEditable={!inert && !optimizing && composerReady}
           suppressContentEditableWarning
           role="textbox"
           aria-multiline="true"
           aria-label={inert ? t('heroChooseWorkspace') : t('chatPlaceholder')}
-          aria-readonly={inert || optimizing}
+          aria-readonly={inert || optimizing || !composerReady}
           data-placeholder={
             inert
               ? t('placeholderWorkspace')
@@ -1859,7 +1930,7 @@ export default function SessionsPage({
             if (!el) return
             const text = serializeEditor(el)
             if (!composingRef.current && !text && el.childNodes.length > 0) el.replaceChildren()
-            setPrompt(text)
+            onDraftChange(text)
             syncPromptHeight()
             if (!composingRef.current) refreshMenus()
           }}
@@ -1869,7 +1940,7 @@ export default function SessionsPage({
           onCompositionEnd={() => {
             composingRef.current = false
             const el = promptRef.current
-            if (el) setPrompt(serializeEditor(el))
+            if (el) onDraftChange(serializeEditor(el))
             refreshMenus()
           }}
           onPaste={onEditorPaste}

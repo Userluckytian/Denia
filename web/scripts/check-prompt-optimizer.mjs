@@ -16,13 +16,18 @@ const src = join(web, 'src')
 const bridgeKey = '__deniaPromptOptimizerRegression'
 const workspace = { id: 'ws-test', title: 'Workspace', path: 'D:/mock-workspace', created_at: 1 }
 const session = { id: 'session-test', title: 'Conversation', cwd: workspace.path, cwd_alive: true, created_at: 1 }
-const bridge = { calls: [], notifications: [], networkAttempts: [], pending: null }
+const bridge = { calls: [], notifications: [], networkAttempts: [], pending: null, memory: new Map() }
 globalThis[bridgeKey] = bridge
 const prelude = `const b = globalThis[${JSON.stringify(bridgeKey)}];`
 const unexpectedApi = ['answerApproval', 'answerAsk', 'cancelAsk', 'cancelSession', 'compactSession',
   'forkSession', 'getCheckpointDiff', 'getCheckpoints', 'getSession', 'goalAction', 'rewindSession',
   'setSessionAgentPreset', 'setSessionPermission', 'chatCompletion', 'postPrompt', 'uploadAttachment']
 const stubs = new Map([
+  ['composerMemory', `${prelude}
+    export async function loadComposer(scope) { return structuredClone(b.memory.get(scope) ?? { text: '', images: [], attachments: [], quotes: [], queue: [] }); }
+    export function readComposerText(scope) { return b.memory.get(scope)?.text ?? null; }
+    export async function saveComposer(scope, snapshot) { b.memory.set(scope, structuredClone(snapshot)); }
+  `],
   ['api', `
     export async function getCatalog() { return { groups: [{ id: 'mock-provider', label: 'Mock', models: [{ id: 'mock-model', name: 'Mock', inputModalities: ['text'] }] }] }; }
     export async function getSettings() { return { namespaces: [] }; }
@@ -88,7 +93,7 @@ const inputs = new Set(Object.keys(result.metafile.inputs)
   .filter(path => !path.startsWith('optimizer-stub:') && path !== '<stdin>')
   .map(path => resolve(web, path).replace(/\\/g, '/')))
 const realInput = path => inputs.has(join(src, path).replace(/\\/g, '/'))
-for (const path of ['api.ts', 'appStore.ts', 'sessionStreams.ts', 'promptOptimizer.ts']) {
+for (const path of ['api.ts', 'appStore.ts', 'sessionStreams.ts', 'promptOptimizer.ts', 'composerMemory.ts']) {
   assert.ok(!realInput(path), `Real ${path} must not be bundled`)
 }
 for (const path of ['pages/SessionsPage.tsx', 'pages/editor.ts', 'features/conversation/useComposerSlash.ts']) {

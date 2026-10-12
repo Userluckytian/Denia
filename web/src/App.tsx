@@ -4,6 +4,7 @@ import { setLocale, t } from './i18n'
 import { relativeTime } from './relativeTime'
 import { subscribeServerEvents, subscribeServerStatus } from './serverEvents'
 import SessionsPage from './pages/SessionsPage'
+import { loadComposer } from './composerMemory'
 import { readCollapsedChildren, writeCollapsedChildren, restoredSidebarSession } from './sidebarMemory'
 import { extensionTabFromHash, type ExtensionTab } from './extensionsRoute'
 import * as api from './api'
@@ -586,8 +587,11 @@ export default function App() {
     // 焦点从本页面创建的空白会话切走:它没有任何内容,直接清理,不留账本残影。
     const left = sessions.find((s) => s.id === prev)
     if (left && isBlank(left)) {
-      deleteSessionAction(prev).catch(() => {
-        // 删除失败(如网络抖动):残留空白无害,下次切走或后端启动清扫会兜底。
+      void loadComposer(`session:${prev}`).then((draft) => {
+        if (draft.text || draft.images.length || draft.attachments.length || draft.quotes.length || draft.queue.length) return
+        return deleteSessionAction(prev)
+      }).catch(() => {
+        // 草稿不可读或删除失败时保留会话，避免误删未发送内容。
       })
     }
   }, [activeId, sessions, localBlankIds, isBlank])

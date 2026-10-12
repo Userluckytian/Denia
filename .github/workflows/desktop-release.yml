@@ -1,0 +1,141 @@
+name: Desktop release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '新 Release 标签（例如 v0.1.0）；留空则按运行编号生成'
+        required: false
+        type: string
+      prerelease:
+        description: '标记为预发布'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      RELEASE_TAG_INPUT: ${{ inputs.tag }}
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = $env:RELEASE_TAG_INPUT.Trim()
+          if (-not $tag) { $tag = "desktop-$env:GITHUB_RUN_NUMBER-$env:GITHUB_RUN_ATTEMPT" }
+          if ($tag -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,100}$') { throw 'Tag must contain only letters, digits, dot, underscore or hyphen.' }
+          $existing = gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot check existing tags.' }
+          if (($existing | ConvertFrom-Json) | Where-Object { $_.ref -eq "refs/tags/$tag" }) { throw "Tag already exists: $tag. Choose a new tag." }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-windows-x64
+
+      - name: Install frontend dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Test and build frontend
+        run: |
+          pnpm --dir web build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path 'web/dist/index.html')) { throw 'Frontend build produced no index.html.' }
+
+      - name: Build desktop with embedded frontend
+        run: |
+          cargo build --locked --release -p denia-desktop --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path 'target/x86_64-pc-windows-msvc/release/denia-desktop.exe')) { throw 'Desktop executable is missing.' }
+
+      - name: Package portable app
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          $package = "Denia-$env:RELEASE_TAG-windows-x64"
+          New-Item -ItemType Directory -Path "release/$package" -Force | Out-Null
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/denia-desktop.exe' "release/$package/Denia.exe"
+          @"
+          Denia Windows x64 portable
+          Release: $env:RELEASE_TAG
+          Commit: $env:GITHUB_SHA
+
+          Extract this archive and run Denia.exe.
+          Microsoft Edge WebView2 Runtime is required.
+          Download: https://developer.microsoft.com/microsoft-edge/webview2/
+          The application is unsigned; Windows may show a SmartScreen warning.
+          Data is stored in the user's .denia directory, not this folder.
+          "@ | Set-Content "release/$package/README.txt" -Encoding utf8
+          Compress-Archive -Path "release/$package/*" -DestinationPath "release/$package.zip"
+          $hash = (Get-FileHash "release/$package.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $package.zip" | Set-Content 'release/SHA256SUMS.txt' -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-x64
+          path: |
+            release/*.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-windows-x64
+          path: release
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.windows.outputs.tag }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          $files = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
+          if ($files.Count -ne 2) { throw 'Expected portable ZIP and SHA256SUMS.txt.' }
+          $arguments = @('release', 'create', $env:RELEASE_TAG, '--target', $env:GITHUB_SHA, '--title', "Denia $env:RELEASE_TAG", '--generate-notes', '--notes', 'Windows x64 portable build. Requires Microsoft Edge WebView2 Runtime. Unsigned binary; see the included README.')
+          if ($env:RELEASE_PRERELEASE -eq 'true') { $arguments += '--prerelease' }
+          & gh @arguments @files
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

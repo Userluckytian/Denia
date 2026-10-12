@@ -40,7 +40,7 @@ const recentEvents = [
 
 const bridge = {
   calls: [], notifications: [], networkAttempts: [], execCalls: [], pickerClicks: [], queue: [],
-  listeners: new Set(),
+  listeners: new Set(), memory: new Map(),
   snapshot: { sessions: [], workspaces: [workspace], activeWs: workspace, activeId: null, running: false },
   postFailures: 0,
   pages: new Map(),
@@ -52,6 +52,7 @@ const bridge = {
   reset(overrides) {
     this.calls = []; this.notifications = []; this.execCalls = []; this.pickerClicks = []; this.queue = []
     this.postFailures = 0
+    this.memory.clear()
     this.pages = new Map([[source.id, { events: recentEvents, hasMoreBefore: true }],
       [sourceTwo.id, { events: [envelope(401, { type: 'user-message', text: 'Independent second question' })], hasMoreBefore: false }]])
     this.snapshot = { sessions: [active, source, sourceTwo], workspaces: [workspace], activeWs: workspace,
@@ -64,6 +65,11 @@ const unexpectedApi = ['answerApproval', 'answerAsk', 'cancelAsk', 'cancelSessio
   'forkSession', 'getCheckpointDiff', 'getCheckpoints', 'getSession', 'goalAction', 'rewindSession',
   'setSessionAgentPreset', 'setSessionPermission', 'chatCompletion']
 const stubs = new Map([
+  ['composerMemory', `${bridgePrelude}
+    export async function loadComposer(scope) { return structuredClone(b.memory.get(scope) ?? { text: '', images: [], attachments: [], quotes: [], queue: [] }); }
+    export function readComposerText(scope) { return b.memory.get(scope)?.text ?? null; }
+    export async function saveComposer(scope, snapshot) { b.memory.set(scope, structuredClone(snapshot)); }
+  `],
   ['api', `${bridgePrelude}
     export async function getCatalog() {
       b.record('getCatalog', []);
@@ -81,7 +87,7 @@ const stubs = new Map([
     }
     export async function getSessionPage(...args) {
       b.record('getSessionPage', args);
-      const page = b.pages.get(args[0]);
+      const page = b.pages.get(args[0]) ?? (['active-test', 'mock-new-session'].includes(args[0]) ? { events: [], hasMoreBefore: false } : null);
       if (!page) throw new Error('Unexpected session page: ' + args[0]);
       return page;
     }
@@ -106,10 +112,16 @@ const stubs = new Map([
     export const useCompactingFor = () => null;
     export const useRunningFor = id => { const s = useStore(); return !!id && s.running; };
     export const getActiveWorkspace = () => b.snapshot.activeWs;
-    export async function ensureSession(ws) { b.record('ensureSession', [ws]); return b.snapshot.activeId ?? (ws ? 'mock-new-session' : null); }
+    export async function ensureSession(ws, ...options) { b.record('ensureSession', [ws, ...options]); return b.snapshot.activeId ?? (ws ? 'mock-new-session' : null); }
     export function notify(...args) { b.notifications.push(args); }
     export function setRunningStatus(id, running) { b.record('setRunningStatus', [id, running]); b.publish({ running }); }
-    export function setActiveId(...args) { b.record('setActiveId', args); }
+    export function setActiveId(...args) {
+      b.record('setActiveId', args);
+      const id = args[0];
+      const sessions = b.snapshot.sessions.some(session => session.id === id) ? b.snapshot.sessions
+        : [...b.snapshot.sessions, { id, title: 'Created conversation', cwd: b.snapshot.activeWs?.path, cwd_alive: true, created_at: 3 }];
+      b.publish({ activeId: id, sessions });
+    }
     export function markStarted(...args) { b.record('markStarted', args); }
     export function markCompacting(...args) { b.record('markCompacting', args); }
     export function refreshList(...args) { b.record('refreshList', args); }
@@ -163,7 +175,7 @@ const inputs = new Set(Object.keys(result.metafile.inputs)
   .filter(path => !path.startsWith('integration-stub:') && path !== '<stdin>')
   .map(path => resolve(web, path).replace(/\\/g, '/')))
 const realInput = path => inputs.has(join(src, path).replace(/\\/g, '/'))
-for (const path of ['api.ts', 'appStore.ts', 'sessionStreams.ts']) {
+for (const path of ['api.ts', 'appStore.ts', 'sessionStreams.ts', 'composerMemory.ts']) {
   assert.ok(!realInput(path), `Real ${path} must not be bundled`)
 }
 for (const path of ['pages/SessionsPage.tsx', 'components/ComposerContextMenu.tsx', 'components/PanePopover.tsx',
@@ -307,6 +319,7 @@ function Harness() {
     return () => bridge.listeners.delete(listener)
   }, () => bridge.snapshot)
   return H(SessionsPage, {
+    key: snapshot.activeId ?? 'draft',
     activeId: snapshot.activeId, locked: false, hasStarted: Boolean(snapshot.activeId),
     onSelectWorkspace: ws => { selectedWorkspaces.push(ws); bridge.publish({ activeWs: ws }) },
     onOpenPicker: () => { pickerRequests++ }, onAddWorkspace: () => { throw new Error('Unexpected workspace creation') },
@@ -458,7 +471,7 @@ try {
   await test('4 最近 events 生成会话 chip，来源信息完整，隔离 system/reasoning/tool/injected', async () => {
     await mount({ activeId: active.id })
     await chooseSession()
-    const request = calls('getSessionPage')[0]
+    const request = calls('getSessionPage').find(call => call.args[0] === source.id)
     assert.equal(request.args[0], source.id)
     assert.deepEqual(request.args[1], { limit: 300 }, 'No before/after cursor: request the latest event page')
     assert.ok(request.args[2] instanceof AbortSignal)
@@ -485,7 +498,9 @@ try {
     assert.equal(calls('postPrompt')[0].args[1].prompt, expectedTitle(source), 'Quote-only message gets a readable fallback body')
     assert.deepEqual(calls('postPrompt')[0].args[1].images, [])
     assert.deepEqual(calls('postPrompt')[0].args[1].files, [])
-    assert.ok(chip(), 'Failure must preserve the quote chip')
+    assert.ok(chip(), 'Failure must preserve the quote chip after activating the created session')
+    assert.deepEqual(bridge.memory.get(`workspace:${workspace.path}`), { text: '', images: [], attachments: [], quotes: [], queue: [] }, 'Migration clears the old workspace snapshot without cleanup resurrecting it')
+    assert.deepEqual(bridge.memory.get('session:mock-new-session').quotes, [expectedQuote()], 'Failed first send persists the quote in the created session')
     assert.equal(editorApi.serializeEditor(editor()), '')
     assert.equal(sendButton().disabled, false)
     assert.ok(bridge.notifications.some(([kind, text]) => kind === 'err' && text === 'MOCK_POST_FAILURE'))
@@ -493,7 +508,7 @@ try {
     await click(sendButton())
     assert.equal(calls('postPrompt').length, 2)
     assert.deepEqual(calls('postPrompt')[1].args, calls('postPrompt')[0].args)
-    assert.deepEqual(calls('ensureSession').map(call => call.args), [[workspace], [workspace]])
+    assert.deepEqual(calls('ensureSession').map(call => call.args), [[workspace, false]], 'Retry uses the newly activated session with restored draft')
     assert.equal(chip(), null)
   })
 
