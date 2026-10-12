@@ -1169,6 +1169,7 @@ export default function SessionsPage({
       })
       if (activeId !== sessionId || optimizeAbortRef.current !== controller) return
       applyDraft(optimized)
+      originalPromptRef.current = original
       setOptimizedPrompt(optimized)
       notify('ok', t('optimizeDone'))
     } catch (error) {
