@@ -11,6 +11,18 @@ const output = join(shots, 'composer-memory.mjs')
 await build({ entryPoints: [join(web, 'src/composerMemory.ts')], outfile: output,
   bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
 
+// Node 22 clones File as Blob; browsers preserve File metadata in structured clone.
+const nativeClone = globalThis.structuredClone
+function browserClone(value) {
+  if (value instanceof File) return new File([value], value.name, { type: value.type, lastModified: value.lastModified })
+  if (Array.isArray(value)) return value.map(browserClone)
+  if (value && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, browserClone(item)]))
+  }
+  return nativeClone(value)
+}
+globalThis.structuredClone = browserClone
+
 // Model asynchronous request/transaction completion and the browser's clone boundary.
 const records = new Map()
 const texts = new Map()
@@ -156,4 +168,5 @@ records.set('session:bad-record', { revision: 1 })
 await assert.rejects(memory.loadComposer('session:bad-record'), /Invalid composer snapshot/)
 assert.ok(records.has('session:bad-record'))
 assert.equal(opened, closed, 'every database connection must close')
+globalThis.structuredClone = nativeClone
 console.log('composer-memory checks passed (payloads, File, isolation, ordered writes, backup, failures)')

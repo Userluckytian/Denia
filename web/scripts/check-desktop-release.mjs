@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-const text = readFileSync(new URL('../../.github/workflows/desktop-release.yml', import.meta.url), 'utf8')
+const text = readFileSync(new URL('../../.github/workflows/desktop-release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const trigger = text.split('\non:\n')[1]?.split('\npermissions:')[0]
 assert.ok(trigger)
 assert.deepEqual([...trigger.matchAll(/^  ([a-z_]+):/gm)].map(match => match[1]), ['workflow_dispatch'])
