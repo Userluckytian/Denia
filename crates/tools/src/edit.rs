@@ -393,10 +393,18 @@ impl Tool for EditTool {
         let write = {
             let path = path.clone();
             let updated = updated.clone();
-            tokio::task::spawn_blocking(move || std::fs::write(&path, updated.as_bytes())).await
+            tokio::task::spawn_blocking(move || {
+                std::fs::write(&path, updated.as_bytes())?;
+                Ok::<_, std::io::Error>(crate::FileEvidence::written(
+                    &path,
+                    "edit",
+                    updated.as_bytes(),
+                ))
+            })
+            .await
         };
-        match write {
-            Ok(Ok(())) => {}
+        let evidence = match write {
+            Ok(Ok(evidence)) => evidence,
             Ok(Err(error)) => {
                 return tool_error(
                     format!("写入 {} 失败:{error}", args.path),
@@ -406,7 +414,7 @@ impl Tool for EditTool {
             Err(join_error) => {
                 return tool_error(format!("编辑任务失败:{join_error}"), "请重试一次");
             }
-        }
+        };
         // 成功消息给出每处编辑的行锚点(按 edits 顺序,与前端逐 hunk 对齐);
         // 单处形式保持原有文案。行锚点列表很长时截断,总数已在前缀里。
         let content = if multi {
@@ -453,7 +461,7 @@ impl Tool for EditTool {
                 state.record_after_write(&path, updated.clone(), stamp);
             }
         }
-        ToolOutput::text(content)
+        ToolOutput::text(content).with_report(evidence.report())
     }
 }
 

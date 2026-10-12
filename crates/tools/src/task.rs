@@ -373,6 +373,7 @@ impl Tool for RunChecksTool {
                 }),
                 files: Vec::new(),
                 evidence_complete: None,
+                file_evidence: None,
             }),
         }
     }

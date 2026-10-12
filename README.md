@@ -71,10 +71,13 @@ With no tag, it generates `desktop-<run number>-<attempt>`. Existing tags are
 rejected to avoid replacing published builds.
 
 It tests and builds the frontend, embeds it into the Windows x64 desktop binary,
-and publishes a portable ZIP plus `SHA256SUMS.txt` to GitHub Releases. Release
-creation targets the exact selected commit. No signing secrets are required;
-the executable is unsigned and requires Microsoft Edge WebView2 Runtime.
-Pushing commits or tags does not trigger this workflow.
+and publishes two executables plus `SHA256SUMS.txt` to GitHub Releases:
+a standalone `Denia-<tag>-windows-x64.exe` to run directly, and a
+`Denia-<tag>-windows-x64-setup.exe` installer that installs for the current user.
+Release creation targets the exact selected commit. No signing secrets are
+required; both executables are unsigned. The installer downloads WebView2 when
+missing, while standalone users must install Microsoft Edge WebView2 Runtime
+themselves. Pushing commits or tags does not trigger this workflow.
 
 ## Test gateway
 

@@ -136,6 +136,15 @@ async fn commit_result(
         touched.push(path);
     }
     let original_chars = output.content.chars().count();
+    if output.artifact.is_none()
+        && !output.is_error
+        && matches!(call.name.as_str(), "read_file" | "grep" | "glob" | "ls" | "edit" | "write_file")
+        && let Some(store) = &state.output_store
+    {
+        let capture = store.start(&["text"]).await;
+        capture.append("text", output.content.as_bytes()).await;
+        output.artifact = Some(capture.finish(true).await);
+    }
     let mut preview_truncation = None;
     if output.artifact.is_none()
         && call.name != "read_tool_output"

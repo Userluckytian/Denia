@@ -38,24 +38,22 @@ fn real_clock() -> Clock {
 }
 
 /// 一个 turn 的执行预算上限(按 turn 读取一致快照)。
+///
+/// `0` = 关闭该道边界(不限);`u64::MAX` 同样视为不限(见 `unbounded`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionLimits {
-    /// 模型步骤上限(默认 128)。
+    /// 模型步骤上限(0 = 不限;默认不限)。
     pub max_steps: u64,
-    /// 物理请求尝试上限(默认 256;含注册表重试、流重试、续写、压缩)。
+    /// 物理请求尝试上限(0 = 不限;含注册表重试、流重试、续写、压缩)。
     pub max_requests: u64,
-    /// 主动执行时间上限(默认 3600000ms = 60 分钟)。
+    /// 主动执行时间上限(0 = 不限;单位毫秒)。
     pub max_active_ms: u64,
 }
 
 impl Default for ExecutionLimits {
     fn default() -> Self {
-        Self {
-            max_steps: 128,
-            max_requests: 256,
-            max_active_ms: 3_600_000,
-        }
+        Self::unbounded()
     }
 }
 
@@ -345,11 +343,13 @@ impl ExecutionBudget {
     }
 
     /// 步骤准入:返回本 turn 已开始的步骤数。超限返回拒绝(不计数)。
+    ///
+    /// 上限为 0 时该边界关闭(不限)。
     pub fn admit_step(&self) -> Result<u64, BudgetRefusal> {
         let now = (self.clock)();
         let mut state = self.lock();
         let active = state.active_ms(now);
-        if active >= state.limits.max_active_ms {
+        if state.limits.max_active_ms != 0 && active >= state.limits.max_active_ms {
             let limit = state.limits.max_active_ms;
             return Err(BudgetRefusal::new(
                 BudgetBoundary::ActiveTime,
@@ -357,7 +357,7 @@ impl ExecutionBudget {
                 active,
             ));
         }
-        if state.steps >= state.limits.max_steps {
+        if state.limits.max_steps != 0 && state.steps >= state.limits.max_steps {
             let limit = state.limits.max_steps;
             return Err(BudgetRefusal::new(
                 BudgetBoundary::Steps,
@@ -372,11 +372,12 @@ impl ExecutionBudget {
     /// 请求准入:返回本 turn 已准入的**计入预算**的请求尝试次数。
     ///
     /// 旁路请求只累计观测计数,不受上限约束也不会被拒绝。
+    /// 上限为 0 时对应边界关闭(不限)。
     pub fn admit_request(&self, call: &RequestCall) -> Result<u64, BudgetRefusal> {
         let now = (self.clock)();
         let mut state = self.lock();
         let active = state.active_ms(now);
-        if active >= state.limits.max_active_ms {
+        if state.limits.max_active_ms != 0 && active >= state.limits.max_active_ms {
             let limit = state.limits.max_active_ms;
             return Err(BudgetRefusal::new(
                 BudgetBoundary::ActiveTime,

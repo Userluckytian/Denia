@@ -80,33 +80,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path 'target/x86_64-pc-windows-msvc/release/denia-desktop.exe')) { throw 'Desktop executable is missing.' }
 
-      - name: Package portable app
+      - name: Build Windows installer
+        working-directory: crates/desktop
+        run: |
+          pnpm dlx @tauri-apps/cli@2 build --target x86_64-pc-windows-msvc --bundles nsis --config tauri.release.conf.json -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare release executables
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           $package = "Denia-$env:RELEASE_TAG-windows-x64"
-          New-Item -ItemType Directory -Path "release/$package" -Force | Out-Null
-          Copy-Item 'target/x86_64-pc-windows-msvc/release/denia-desktop.exe' "release/$package/Denia.exe"
-          @"
-          Denia Windows x64 portable
-          Release: $env:RELEASE_TAG
-          Commit: $env:GITHUB_SHA
-
-          Extract this archive and run Denia.exe.
-          Microsoft Edge WebView2 Runtime is required.
-          Download: https://developer.microsoft.com/microsoft-edge/webview2/
-          The application is unsigned; Windows may show a SmartScreen warning.
-          Data is stored in the user's .denia directory, not this folder.
-          "@ | Set-Content "release/$package/README.txt" -Encoding utf8
-          Compress-Archive -Path "release/$package/*" -DestinationPath "release/$package.zip"
-          $hash = (Get-FileHash "release/$package.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $package.zip" | Set-Content 'release/SHA256SUMS.txt' -Encoding ascii
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/denia-desktop.exe' "release/$package.exe"
+          $installers = @(Get-ChildItem 'target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer.' }
+          Copy-Item $installers[0].FullName "release/$package-setup.exe"
+          $checksums = Get-ChildItem 'release/*.exe' -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $checksums | Set-Content 'release/SHA256SUMS.txt' -Encoding ascii
 
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-windows-x64
           path: |
-            release/*.zip
+            release/*.exe
             release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7
@@ -134,8 +134,8 @@ jobs:
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
         run: |
           $files = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
-          if ($files.Count -ne 2) { throw 'Expected portable ZIP and SHA256SUMS.txt.' }
-          $arguments = @('release', 'create', $env:RELEASE_TAG, '--target', $env:GITHUB_SHA, '--title', "Denia $env:RELEASE_TAG", '--generate-notes', '--notes', 'Windows x64 portable build. Requires Microsoft Edge WebView2 Runtime. Unsigned binary; see the included README.')
+          if ($files.Count -ne 3) { throw 'Expected standalone EXE, NSIS setup EXE and SHA256SUMS.txt.' }
+          $arguments = @('release', 'create', $env:RELEASE_TAG, '--target', $env:GITHUB_SHA, '--title', "Denia $env:RELEASE_TAG", '--generate-notes', '--notes', 'Windows x64: download the standalone .exe to run directly, or the -setup.exe installer to install. The installer downloads WebView2 if needed (internet required); standalone users must install WebView2 separately. Both executables are unsigned; Windows may show a SmartScreen warning.')
           if ($env:RELEASE_PRERELEASE -eq 'true') { $arguments += '--prerelease' }
           & gh @arguments @files
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

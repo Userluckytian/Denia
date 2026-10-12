@@ -1154,6 +1154,7 @@ pub const BASELINE_INJECTION_CHANNELS: &[&str] = &[
     "subagent-catalog",
     "system-prompt-update",
     "runtime-context",
+    "coding-workbench",
 ];
 
 /// 该注入通道是否按"最新有效基线"折叠旧版本。

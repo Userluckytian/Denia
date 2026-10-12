@@ -97,8 +97,10 @@ pub(crate) async fn dispatch_request(
     // 先做廉价的工具结果微压缩(不调模型),再做压力驱动的 LLM 摘要。
     // 顺序:先轻量清理,再重量摘要。
     // 轻量清理能把压力降下来,很多时候就不必动用昂贵的摘要了。
+    crate::workbench_runtime::prepare(driver, state, step).await;
     run_microcompact_gate(driver, state, step).await;
     run_compaction_gate(driver, state, step, framed_system, tools, false).await;
+    crate::workbench_runtime::refresh(state);
 
     let mut request = GenerateRequest {
         model: state.selection.model.clone(),
@@ -769,12 +771,12 @@ fn restore_read_state_after_compact(driver: &SessionDriver, state: &TurnState, s
         Err(_) => return,
     };
 
-    // 组装"路径 + 内容"列表(只取保留了完整内容的条目)。
+    // 压缩后只恢复定位信息；文件正文按需重新读取。
     let pairs: Vec<(String, String)> = entries
         .into_iter()
-        .filter_map(|(key, entry)| {
-            let content = entry.content?;
-            Some((key.path.to_string_lossy().replace('\\', "/"), content))
+        .map(|(key, _)| {
+            (key.path.to_string_lossy().replace('\\', "/"),
+             "[历史读取索引，不是当前文件快照。需要内容时用 read_file 重读；不要依据旧测试推断新版本已通过。]".to_string())
         })
         .collect();
 

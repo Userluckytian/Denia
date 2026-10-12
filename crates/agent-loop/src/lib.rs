@@ -32,6 +32,8 @@ mod rescue;
 mod runtime_context;
 mod turn;
 mod workspace_instructions;
+mod workbench;
+mod workbench_runtime;
 
 use std::path::PathBuf;
 use std::sync::Arc;

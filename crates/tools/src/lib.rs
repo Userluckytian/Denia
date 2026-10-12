@@ -11,6 +11,7 @@ mod browser;
 pub mod capabilities;
 pub mod coordination;
 mod edit;
+mod file_evidence;
 mod files;
 pub mod glob;
 mod goal;
@@ -43,6 +44,7 @@ pub use ask::{AskTool, DEFAULT_TIMEOUT_MS as ASK_DEFAULT_TIMEOUT_MS};
 pub use bash::BashTool;
 pub use browser::{BrowserExecute, BrowserHub, BrowserTool};
 pub use edit::EditTool;
+pub use file_evidence::{FileEvidence, FileFingerprint};
 pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;
 pub use goal::{GetGoalTool, UpdateGoalTool};
@@ -166,7 +168,7 @@ pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
     pub artifact: Option<output::OutputArtifact>,
-    /// 结构化执行信息;不执行命令的工具(读文件、ls、……)恒为 `None`。
+    /// 结构化执行信息及文件版本证据。
     pub report: Option<ExecutionReport>,
 }
 
@@ -213,6 +215,12 @@ impl ToolOutput {
 /// 哨兵只是文案里的展示约定,不是退出码)。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionReport {
+    #[serde(
+        default,
+        rename = "fileEvidence",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub file_evidence: Option<FileEvidence>,
     /// 命令类工具的退出码;`None` = 不适用或未取得。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
