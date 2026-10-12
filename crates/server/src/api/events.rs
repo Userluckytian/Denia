@@ -149,6 +149,59 @@ fn reply(
         .into_response()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sse_live_delivers_normal_events_and_closes_with_sender() {
+        let (sender, receiver) = tokio::sync::broadcast::channel(2);
+        let mut stream = Box::pin(live_until_lagged(receiver));
+        sender.send(1).unwrap();
+        sender.send(2).unwrap();
+        assert_eq!(stream.next().await, Some(1));
+        assert_eq!(stream.next().await, Some(2));
+        drop(sender);
+        assert_eq!(stream.next().await, None);
+    }
+
+    #[tokio::test]
+    async fn sse_live_lag_ends_stream_instead_of_skipping_gap() {
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        let mut stream = Box::pin(live_until_lagged(receiver));
+        sender.send(1).unwrap();
+        assert_eq!(stream.next().await, Some(1));
+        sender.send(2).unwrap();
+        sender.send(3).unwrap();
+        assert_eq!(stream.next().await, None);
+        // Buffered and future events must not revive a stream after a gap.
+        sender.send(4).unwrap();
+        assert_eq!(stream.next().await, None);
+    }
+
+    #[tokio::test]
+    async fn sse_live_lag_during_replay_ends_after_replay() {
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        let live = live_until_lagged(receiver);
+        let mut stream = Box::pin(futures::stream::iter([1, 2]).chain(live));
+        sender.send(3).unwrap();
+        sender.send(4).unwrap();
+        assert_eq!(stream.next().await, Some(1));
+        assert_eq!(stream.next().await, Some(2));
+        assert_eq!(stream.next().await, None);
+    }
+}
+
+/// A gap must end SSE so reconnecting clients reload authoritative state.
+/// Filtering out Lagged would leave the connection alive with missing events.
+pub(super) fn live_until_lagged<T: Clone + Send + 'static>(
+    receiver: tokio::sync::broadcast::Receiver<T>,
+) -> impl futures::Stream<Item = T> {
+    BroadcastStream::new(receiver)
+        .take_while(|result| futures::future::ready(result.is_ok()))
+        .map(|result| result.expect("take_while stops at lag"))
+}
+
 async fn events_stream(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
@@ -160,15 +213,8 @@ async fn events_stream(
     };
     let snapshot_event =
         Event::default().data(serde_json::to_string(&snapshot).unwrap_or_default());
-    let live = BroadcastStream::new(receiver).filter_map(|result| async move {
-        match result {
-            Ok(event) => Some(Ok(
-                Event::default().data(serde_json::to_string(&event).unwrap_or_default())
-            )),
-            // Lagged receivers skip the missed batch; the next state read
-            // resynchronizes the console.
-            Err(_) => None,
-        }
+    let live = live_until_lagged(receiver).map(|event| {
+        Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default()))
     });
     let stream = futures::stream::once(async move { Ok(snapshot_event) }).chain(live);
     // 心跳要发成**带 data 的普通帧**,而不是默认那行 `:` 注释:注释行既不被

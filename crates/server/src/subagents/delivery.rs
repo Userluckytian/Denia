@@ -25,7 +25,7 @@ struct State {
     /// 按**通知身份**记,而不是按子代理:同一个子代理续跑后的每一次
     /// 结束都各有自己的遗留任务要收,按会话记会让后续轮次漏清理。
     cleaning: HashMap<String, (String, bool)>,
-    waking: HashSet<String>,
+    waking: HashMap<String, bool>,
 }
 
 #[derive(Default)]
@@ -113,11 +113,29 @@ impl Delivery {
     }
 
     pub fn start_wake(&self, id: &str) -> bool {
-        self.state.lock().unwrap_or_else(|p| p.into_inner()).waking.insert(id.into())
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        match state.waking.entry(id.into()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                *entry.get_mut() = true;
+                false
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(false);
+                true
+            }
+        }
     }
 
-    pub fn finish_wake(&self, id: &str) {
-        self.state.lock().unwrap_or_else(|p| p.into_inner()).waking.remove(id);
+    /// 检查后续请求与释放所有权必须原子完成，否则空闲边沿会丢失。
+    pub fn finish_wake(&self, id: &str) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(pending) = state.waking.get_mut(id) {
+            if std::mem::take(pending) {
+                return true;
+            }
+        }
+        state.waking.remove(id);
+        false
     }
 
     pub fn forget(&self, id: &str) {
@@ -132,6 +150,21 @@ impl Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_requests_are_coalesced_without_losing_the_idle_edge() {
+        let queue = Delivery::default();
+        assert!(queue.start_wake("parent"));
+        assert!(!queue.start_wake("parent"));
+        assert!(!queue.start_wake("parent"));
+        assert!(queue.finish_wake("parent"));
+        // 后续请求由原 worker 继续处理，不能同时启动第二个 worker。
+        assert!(!queue.start_wake("parent"));
+        assert!(queue.finish_wake("parent"));
+        assert!(!queue.finish_wake("parent"));
+        assert!(queue.start_wake("parent"));
+        assert!(!queue.finish_wake("parent"));
+    }
 
     #[test]
     fn notices_retry_without_reusing_terminal_identity() {

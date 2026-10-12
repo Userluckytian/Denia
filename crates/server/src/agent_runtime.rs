@@ -618,18 +618,20 @@ impl Runtime {
         let id = id.to_string();
         tokio::spawn(async move {
             use futures::FutureExt;
-            let before = runtime.inner.live.get(&id).map(|live| live.session.next_turn_number());
-            let result = std::panic::AssertUnwindSafe(runtime.resume_pending(&id))
-                .catch_unwind().await;
-            match result {
-                Ok(Err(error)) => tracing::error!(session=%id,%error,"恢复代理消息失败"),
-                Err(_) => tracing::error!(session=%id,"代理运行任务异常退出"),
-                _ => {}
-            }
-            runtime.inner.delivery.finish_wake(&id);
-            let after = runtime.inner.live.get(&id).map(|live| live.session.next_turn_number());
-            if after != before {
-                runtime.inner.delivery.changed.notify_one();
+            loop {
+                let result = std::panic::AssertUnwindSafe(runtime.resume_pending(&id))
+                    .catch_unwind().await;
+                match result {
+                    Ok(Err(error)) => tracing::error!(session=%id,%error,"恢复代理消息失败"),
+                    Err(_) => tracing::error!(session=%id,"代理运行任务异常退出"),
+                    _ => {}
+                }
+                // on_idle 或新投递可能发生在本 worker 尚未释放所有权时。
+                // 保留这次请求并串行处理，不依赖心跳或下一条用户消息。
+                if !runtime.inner.delivery.finish_wake(&id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
         });
     }
@@ -6114,6 +6116,40 @@ mod tests {
             consumed,
             "唤醒额度耗尽后,子代理完成通知仍必须自动唤醒主代理并被消费"
         );
+    }
+
+    #[tokio::test]
+    async fn completion_batches_resume_without_another_user_prompt() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.as_deref().unwrap();
+        let live = state.live.get(parent).unwrap();
+        live.running.store(false, Ordering::SeqCst);
+        state.runtime.inner.selections.lock().unwrap().insert(
+            parent.into(), ctx.selection.clone().unwrap(),
+        );
+        state.runtime.inner.wakes.lock().unwrap().insert(
+            parent.into(), state.runtime.config().max_consecutive_wakes,
+        );
+        // 每轮空闲都与前一唤醒任务的退出交错，通知次数超过普通唤醒额度。
+        for batch in 0..8 {
+            let id = format!("completion-batch-{batch}");
+            state.runtime.enqueue(parent, id.clone(), "子代理已完成".into(), "subagent-settled".into()).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let delivered = live.session.events().iter().any(|event| {
+                        matches!(&event.event, SessionEvent::AgentDelivery { id: delivered, .. } if delivered == &id)
+                    });
+                    if delivered && !live.running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("每批完成通知都必须自行启动并结束主代理轮次");
+        }
+        let events = live.session.events();
+        assert_eq!(events.iter().filter(|event| matches!(event.event, SessionEvent::TurnStart { .. })).count(), 8);
+        assert_eq!(events.iter().filter(|event| matches!(event.event, SessionEvent::AgentDelivery { .. })).count(), 8);
+        assert!(!events.iter().any(|event| matches!(event.event, SessionEvent::UserMessage { injected: false, .. })));
     }
 
     /// 普通代理消息的防循环护栏仍然有效:额度耗尽后不再自动开轮。

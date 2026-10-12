@@ -28,7 +28,6 @@ use denia_core::session::{
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::application::sessions::model_vision_supported;
@@ -1060,14 +1059,7 @@ async fn follow_session(
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
     state.live.touch(&id);
-    let live_stream =
-        BroadcastStream::new(live.followers.subscribe()).filter_map(|result| async move {
-            match result {
-                Ok(envelope) => Some(envelope),
-                // Lagged: close so the client re-snapshots.
-                Err(_) => None,
-            }
-        });
+    let live_stream = super::events::live_until_lagged(live.followers.subscribe());
     // 只拉增量区间(after 到尾部),长会话断线重连不再克隆全量日志。
     let replay: Vec<SessionEnvelope> = live.session.events_after(query.after);
     let stream = futures::stream::iter(replay)
