@@ -4,6 +4,10 @@
  */
 
 const zh = {
+  extensionsTitle: '拓展管理',
+  extensionsSkills: '技能',
+  extensionsDescription: '管理技能与外部工具，为你的工作流程添加能力。',
+  extensionsWorkspace: '当前工作区',
   runtimeMaxJobs: "每个会话的后台并发上限",
   runtimeRetainedJobs: "后台任务记录上限",
   runtimeOutputBytes: "单任务保留输出（字节）",
@@ -1241,6 +1245,10 @@ const zh = {
 }
 
 const en: typeof zh = {
+  extensionsTitle: 'Extensions',
+  extensionsSkills: 'Skills',
+  extensionsDescription: 'Manage skills and external tools for your workflow.',
+  extensionsWorkspace: 'Workspace',
   runtimeMaxJobs: "Background jobs per session",
   runtimeRetainedJobs: "Retained job limit",
   runtimeOutputBytes: "Output retained per job (bytes)",

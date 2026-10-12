@@ -1,4 +1,3 @@
-import { McpSettings } from './settings/McpSettings'
 import { SubagentSettings } from './settings/SubagentSettings'
 import { RemoteAccessSettings } from './settings/RemoteAccessSettings'
 import { RuntimeSettings } from './settings/RuntimeSettings'
@@ -20,7 +19,6 @@ import {
   IconPrompt,
   IconSliders,
   IconStack,
-  IconTool,
 } from './icons'
 import { LlmPanel } from './llm/LlmPanel'
 import { AgentPresetSettings } from './settings/AgentPresetSettings'
@@ -34,7 +32,6 @@ type SettingsTab =
   | 'presets'
   | 'prompts'
   | 'models'
-  | 'mcp'
   | 'memory'
   | 'remote'
   | 'appearance'
@@ -47,7 +44,6 @@ const TABS: SettingsTab[] = [
   'presets',
   'prompts',
   'models',
-  'mcp',
   'memory',
   'remote',
   'runtime',
@@ -84,8 +80,6 @@ function tabIcon(tab: SettingsTab, size = 16) {
       return <IconPrompt size={size} />
     case 'models':
       return <IconSliders size={size} />
-    case 'mcp':
-      return <IconTool size={size} />
     case 'memory':
       return <IconStack size={size} />
     case 'remote':
@@ -109,8 +103,6 @@ function tabLabel(tab: SettingsTab): string {
       return t('settingsTabPrompts')
     case 'models':
       return t('settingsTabModels')
-    case 'mcp':
-      return t('mcpTab')
     case 'memory':
       return t('memoryTab')
     case 'remote':
@@ -134,8 +126,6 @@ function tabNavDesc(tab: SettingsTab): string {
       return t('settingsTabPromptsDesc')
     case 'models':
       return t('settingsTabModelsDesc')
-    case 'mcp':
-      return t('mcpTabDesc')
     case 'memory':
       return t('memoryTabDesc')
     case 'remote':
@@ -159,8 +149,6 @@ function paneTitle(tab: SettingsTab): string {
       return t('settingsPanePromptsTitle')
     case 'models':
       return t('settingsPaneModelsTitle')
-    case 'mcp':
-      return t('mcpPaneTitle')
     case 'memory':
       return t('memoryPaneTitle')
     case 'remote':
@@ -184,8 +172,6 @@ function paneDesc(tab: SettingsTab): string {
       return t('settingsPanePromptsDesc')
     case 'models':
       return t('settingsPaneModelsDesc')
-    case 'mcp':
-      return t('mcpPaneDesc')
     case 'memory':
       return t('memoryPaneDesc')
     case 'remote':
@@ -589,7 +575,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 {tab === 'presets' && <AgentPresetSettings notify={notify} />}
                 {tab === 'models' && <LlmPanel notify={notify} />}
 
-                {tab === 'mcp' && <McpSettings notify={notify} />}
 
                 {tab === 'memory' && <MemorySettings />}
 

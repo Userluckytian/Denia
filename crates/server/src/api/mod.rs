@@ -17,6 +17,7 @@ mod remote;
 mod runtime;
 mod sessions;
 mod settings;
+mod skills;
 mod subagents;
 mod system_prompt;
 mod terminals;
@@ -83,6 +84,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(sessions::router())
         .merge(goal::router())
         .merge(runtime::router())
+        .merge(skills::router())
         .merge(workspaces::router())
         .merge(uploads::router())
         .merge(fs::router())

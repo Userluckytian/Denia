@@ -1340,12 +1340,13 @@ export function getMcp(): Promise<McpDescribe> {
 export function saveMcpServer(
   server: McpServerDraft,
   expectedRevision?: number,
+  preserveSecrets = false,
 ): Promise<McpDescribe> {
   return http(
     '/api/mcp/servers',
     {
       method: 'PUT',
-      body: JSON.stringify({ server, expectedRevision }),
+      body: JSON.stringify({ server, expectedRevision, preserveSecrets }),
     },
     60_000,
   )

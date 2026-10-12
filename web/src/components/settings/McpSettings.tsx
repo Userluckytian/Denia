@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { CaretDown, MagnifyingGlass, Plug, Plus } from '@phosphor-icons/react'
 import * as api from '../../api'
 import { t } from '../../i18n'
 import { ConfirmDialog } from '../ConfirmDialog'
@@ -12,16 +13,17 @@ type EditorMode = 'form' | 'json'
  * 后端按 user 同样处理以避免半成品行为(UI 提示用户当前生效范围)。 */
 type ScopeValue = 'user' | 'project'
 
-/** 协议版本白名单:当前只接受自动协商,但保留 UI 入口与字段以便升级。 */
-const PROTOCOL_VERSION_OPTIONS: { id: string; label: string }[] = [
-  { id: 'auto', label: '自动(推荐)' },
-  { id: '2024-11-05', label: '2024-11-05' },
-]
-
 /** 传输方式:stdio(本地命令)/ http(Streamable HTTP)/ sse(HTTP+SSE)。 */
 type TransportValue = 'stdio' | 'http' | 'sse'
 
 /** 编辑态:同时容纳两种模式(`mode === 'json'` 时只看 `rawJson`)。 */
+type ServerDraft = api.McpServerDraft & {
+  scope?: ScopeValue
+  workspaceId?: string | null
+  protocolVersion?: string
+  callTimeoutMs?: number | null
+}
+
 interface EditorState {
   mode: EditorMode
   scope: ScopeValue
@@ -40,7 +42,7 @@ interface EditorState {
   timeoutMs: string
   enabled: boolean
   // 原始 draft(用于错误展示/模式切换回退)。
-  original: api.McpServerDraft | null
+  original: ServerDraft | null
   // JSON 模式下的文本。
   rawJson: string
   // 表单/JSON 各自一份解析错误。
@@ -73,6 +75,13 @@ const ID_PATTERN = /^[a-z][a-z0-9-]*$/
 
 /** 把参数串按引号/空格拆成数组(供表单态 args 字段解析)。 */
 function splitArgs(raw: string): string[] {
+  if (raw.trim().startsWith('[')) {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed) || parsed.some((arg) => typeof arg !== 'string')) {
+      throw new Error('参数 JSON 必须是字符串数组')
+    }
+    return parsed as string[]
+  }
   const out: string[] = []
   let current = ''
   let quote: '"' | "'" | null = null
@@ -143,7 +152,7 @@ function formatEnvLines(env: Record<string, string>): string {
  *
  * 解析失败返回错误文本,由 UI 提示,不会让坏值进 settings。
  */
-function parseDshJson(raw: string): { draft: api.McpServerDraft; error: string | null } {
+function parseDshJson(raw: string): { draft: ServerDraft; error: string | null } {
   const trimmed = raw.trim()
   if (!trimmed) {
     return { draft: emptyDraftFromJson(), error: '请粘贴 JSON 配置' }
@@ -210,6 +219,10 @@ function parseDshJson(raw: string): { draft: api.McpServerDraft; error: string |
   return {
     draft: {
       id,
+      scope: cfg.scope as ScopeValue | undefined,
+      workspaceId: cfg.workspaceId as string | null | undefined,
+      protocolVersion: cfg.protocolVersion as string | undefined,
+      callTimeoutMs: cfg.callTimeoutMs as number | null | undefined,
       transport: type,
       command,
       args,
@@ -249,13 +262,19 @@ function emptyDraftFromJson(): api.McpServerDraft {
 }
 
 /** 把 draft 序列化成 dsh 风格的 JSON 文本(用作 JSON 模式的初值)。 */
-function draftToJson(draft: api.McpServerDraft): string {
+function draftToJson(draft: ServerDraft): string {
   const def: Record<string, unknown> = {
     type: draft.transport,
     command: draft.command,
     args: draft.args,
+    scope: draft.scope,
+    workspaceId: draft.workspaceId,
+    protocolVersion: draft.protocolVersion,
+    callTimeoutMs: draft.callTimeoutMs,
   }
   if (draft.env && Object.keys(draft.env).length > 0) def.env = draft.env
+  if (draft.url) def.url = draft.url
+  if (draft.headers && Object.keys(draft.headers).length > 0) def.headers = draft.headers
   if (draft.cwd) def.cwd = draft.cwd
   if (!draft.enabled) def.enabled = false
   if (draft.disabledTools.length > 0) def.disabledTools = draft.disabledTools
@@ -264,11 +283,50 @@ function draftToJson(draft: api.McpServerDraft): string {
   return JSON.stringify(obj, null, 2)
 }
 
+const SENSITIVE_KEY = /api[-_]?key|token|password|passwd|secret|authorization|credential/i
+
+function maskUrl(raw: string): string {
+  try {
+    const url = new URL(raw)
+    if (url.username) url.username = '••••'
+    if (url.password) url.password = '••••'
+    for (const key of [...url.searchParams.keys()]) {
+      if (SENSITIVE_KEY.test(key)) url.searchParams.set(key, '••••')
+    }
+    return url.toString().replaceAll('%E2%80%A2', '•')
+  } catch {
+    return raw.replace(/(\/\/)[^/@\s]+@/g, '$1••••@')
+      .replace(/([?&](?:[^=&]*(?:key|token|password|secret|authorization)[^=&]*)=)[^&#]*/gi, '$1••••')
+  }
+}
+
+function maskCommand(server: api.McpServerInfo): string {
+  if (server.transport !== 'stdio') return maskUrl(server.url ?? server.transport)
+  let maskNext = false
+  const args = server.args.map((arg) => {
+    if (maskNext) {
+      maskNext = false
+      return '••••'
+    }
+    const [key] = arg.split('=', 1)
+    if (SENSITIVE_KEY.test(key) && (/^-/.test(key) || arg.includes('='))) {
+      const equal = arg.indexOf('=')
+      if (equal >= 0) return `${arg.slice(0, equal + 1)}••••`
+      maskNext = true
+      return arg
+    }
+    return arg.replace(/https?:\/\/\S+/g, (url) => maskUrl(url))
+  })
+  return [server.command.replace(/https?:\/\/\S+/g, (url) => maskUrl(url)), ...args].join(' ')
+}
+
 export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: string) => void }) {
   const [data, setData] = useState<api.McpDescribe | null>(null)
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | api.McpServerInfo['status']>('all')
 
   // 编辑态:null = 关闭对话框。
   const [editing, setEditing] = useState<EditorState | null>(null)
@@ -347,32 +405,33 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
     setEditing(next)
   }
 
-  /** 打开「编辑」对话框:env 值不回传,留空让用户重填。 */
+  /** 敏感值不回填;编辑保存由服务端保留未提供的键。 */
   const startEdit = (server: api.McpServerInfo) => {
-    const draft: api.McpServerDraft = {
+    const draft: ServerDraft = {
       id: server.id,
       transport: server.transport,
       command: server.command,
       args: server.args,
       env: {},
+      url: server.url ?? null,
       cwd: server.cwd ?? null,
       enabled: server.enabled,
       disabledTools: server.tools.filter((tool) => !tool.enabled).map((tool) => tool.name),
     }
     const next: EditorState = {
       mode: 'form',
-      scope: 'user',
+      scope: draft.scope ?? 'user',
       transport: (draft.transport as TransportValue) ?? 'stdio',
       id: draft.id,
       name: draft.id,
       command: draft.command,
-      args: draft.args.join(' '),
+      args: JSON.stringify(draft.args),
       envText: '',
       cwd: draft.cwd ?? '',
       url: draft.url ?? '',
       headersText: '',
-      protocolVersion: 'auto',
-      timeoutMs: '30000',
+      protocolVersion: draft.protocolVersion ?? 'auto',
+      timeoutMs: draft.callTimeoutMs == null ? '' : String(draft.callTimeoutMs),
       enabled: draft.enabled,
       original: draft,
       rawJson: draftToJson(draft),
@@ -398,7 +457,7 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
         name: draft.id,
         transport: (draft.transport as TransportValue) ?? 'stdio',
         command: draft.command,
-        args: draft.args.join(' '),
+        args: JSON.stringify(draft.args),
         envText: formatEnvLines(draft.env),
         cwd: draft.cwd ?? '',
         url: draft.url ?? '',
@@ -410,13 +469,17 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
     } else {
       // 表单 → JSON:只做数据搬运,**不做校验**——用户可能正要切过去
       // 补填(id/命令还没填是允许的)。校验留给保存时统一做。
-      const draft = draftFromForm(editing)
-      setEditing({ ...editing, mode: 'json', rawJson: draftToJson(draft), error: '' })
+      try {
+        const draft = draftFromForm(editing)
+        setEditing({ ...editing, mode: 'json', rawJson: draftToJson(draft), error: '' })
+      } catch (cause) {
+        setEditing({ ...editing, error: cause instanceof Error ? cause.message : String(cause) })
+      }
     }
   }
 
   /// 表单态 → 草稿(纯搬运,不校验)。切到 JSON 模式时用它。
-  const draftFromForm = (state: EditorState): api.McpServerDraft => ({
+  const draftFromForm = (state: EditorState): ServerDraft => ({
     id: state.id.trim(),
     transport: state.transport,
     command: state.command.trim(),
@@ -426,7 +489,7 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
     headers: parseEnvLines(state.headersText),
     cwd: state.cwd.trim() || null,
     enabled: state.enabled,
-    disabledTools: [],
+    disabledTools: state.original?.disabledTools ?? [],
   })
 
   /// 保存前校验:不合法时把错误写回 `editing.error` 并返回 null。
@@ -443,7 +506,12 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
       setEditing({ ...state, error: t('mcpErrorUrl') })
       return null
     }
-    return draftFromForm(state)
+    try {
+      return draftFromForm(state)
+    } catch (cause) {
+      setEditing({ ...state, error: cause instanceof Error ? cause.message : String(cause) })
+      return null
+    }
   }
 
   const submit = async () => {
@@ -467,7 +535,7 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
     setBusyId('form')
     setEditing({ ...editing, error: '' })
     try {
-      applyResult(await api.saveMcpServer(draft))
+      applyResult(await api.saveMcpServer(draft, undefined, !!editing.original))
       setEditing(null)
       notify('ok', t('mcpServerSaved'))
     } catch (cause) {
@@ -480,17 +548,25 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
   }
 
   const totalTools = useMemo(() => data?.toolCount ?? 0, [data])
+  const filteredServers = useMemo(() => {
+    const search = query.trim().toLocaleLowerCase()
+    return (data?.servers ?? []).filter((server) =>
+      (statusFilter === 'all' || server.status === statusFilter)
+      && (!search || [server.id, server.transport, server.command, ...server.args, server.url ?? '']
+        .join(' ').toLocaleLowerCase().includes(search)),
+    )
+  }, [data, query, statusFilter])
 
   if (loading) {
     return (
-      <section className="setm-section">
+      <section className={styles.panel}>
         <p className={styles.hint}>{t('loading')}</p>
       </section>
     )
   }
 
   return (
-    <section className="setm-section">
+    <section className={styles.panel}>
       {error && (
         <p className={styles.error} role="alert">
           {error}
@@ -499,16 +575,43 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
 
       <header className={styles.head}>
         <div>
+          <h2 className={styles.title}>MCP 服务器</h2>
+          <p className={styles.hint}>{t('mcpPaneDesc')}</p>
           <p className={styles.summary}>
             {t('mcpServerCount', { count: data?.servers.length ?? 0 })} ·{' '}
             {t('mcpToolCount', { count: totalTools })}
           </p>
-          <p className={styles.hint}>{t('mcpPaneDesc')}</p>
         </div>
         <Button variant="primary" small onClick={startCreate} disabled={editing != null}>
+          <Plus size={15} aria-hidden="true" />
           {t('mcpAddServer')}
         </Button>
       </header>
+
+      <div className={styles.toolbar}>
+        <label className={styles.search}>
+          <MagnifyingGlass size={17} aria-hidden="true" />
+          <input
+            type="search"
+            aria-label="搜索 MCP 服务器"
+            placeholder="搜索服务器、命令或地址…"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <label className={styles.filter}>
+          <span>连接状态</span>
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
+          >
+            <option value="all">全部状态</option>
+            <option value="connected">{t('mcpStatusConnected')}</option>
+            <option value="error">{t('mcpStatusError')}</option>
+            <option value="disabled">{t('mcpStatusDisabled')}</option>
+          </select>
+        </label>
+      </div>
 
       {editing && (
         <div
@@ -529,6 +632,7 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
               <div>
                 <h3 className={styles.modalTitle}>{t('mcpEditorTitle')}</h3>
                 <p className={styles.hint}>{t('mcpEditorDesc')}</p>
+                {editing.original && <p className={styles.hint}>环境变量与请求头不会显示原值；留空保留原值，填写同名键可覆盖。</p>}
               </div>
               <div className={styles.modeSwitch} role="tablist">
                 <button
@@ -551,34 +655,6 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
                 </button>
               </div>
             </header>
-
-            <div className={styles.scopeRow}>
-              <span className={styles.scopeLabel}>{t('mcpScopeLabel')}</span>
-              <div className={styles.scopeChips} role="radiogroup">
-                {(
-                  [
-                    { id: 'user', label: t('mcpScopeUser') },
-                    { id: 'project', label: t('mcpScopeProject') },
-                  ] as { id: ScopeValue; label: string }[]
-                ).map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={editing.scope === option.id}
-                    className={`${styles.scopeChip}${editing.scope === option.id ? ` ${styles.active}` : ''}`}
-                    onClick={() => setEditing({ ...editing, scope: option.id })}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <p className={styles.hint}>
-                {editing.scope === 'user'
-                  ? t('mcpScopeUserHint')
-                  : t('mcpScopeProjectHint')}
-              </p>
-            </div>
 
             {editing.mode === 'form' ? (
               <form
@@ -627,34 +703,7 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
                         : t('mcpTypeSseHint')}
                   </span>
                 </Field>
-                <Field label={t('mcpTimeout')} error={null}>
-                  <TextInput
-                    mono
-                    type="text"
-                    inputMode="numeric"
-                    value={editing.timeoutMs}
-                    onChange={(next) => setEditing({ ...editing, timeoutMs: next })}
-                    placeholder="30000"
-                  />
-                </Field>
-                <Field label={t('mcpProtocolVersion')} error={null}>
-                  <div className={styles.typeChips} role="radiogroup">
-                    {PROTOCOL_VERSION_OPTIONS.map((option) => (
-                      <button
-                        key={option.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={editing.protocolVersion === option.id}
-                        className={`${styles.typeChip}${editing.protocolVersion === option.id ? ` ${styles.active}` : ''}`}
-                        onClick={() =>
-                          setEditing({ ...editing, protocolVersion: option.id })
-                        }
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </Field>
+                <p className={styles.hint}>此表单仅编辑连接配置；作用域、协议版本与调用超时沿用服务器原配置，新建时使用默认值。</p>
                 {editing.transport === 'stdio' ? (
                   <>
                     <Field label={t('mcpCommand')} error={null}>
@@ -665,7 +714,7 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
                         placeholder={t('mcpCommandPlaceholder')}
                       />
                     </Field>
-                    <Field label={t('mcpArgs')} hint={t('mcpArgsHint')} error={null}>
+                    <Field label={t('mcpArgs')} hint={`${t('mcpArgsHint')}；也支持 JSON 字符串数组，可完整保留空格、引号和反斜杠。`} error={null}>
                       <TextInput
                         mono
                         value={editing.args}
@@ -758,27 +807,24 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
 
       {!data || data.servers.length === 0 ? (
         <p className={styles.empty}>{t('mcpNoServers')}</p>
+      ) : filteredServers.length === 0 ? (
+        <div className={styles.empty}>
+          <p>没有匹配的服务器，试试其他关键词或连接状态。</p>
+          <Button small onClick={() => { setQuery(''); setStatusFilter('all') }}>清除筛选</Button>
+        </div>
       ) : (
         <ul className={styles.list}>
-          {data.servers.map((server) => {
-            const busy = busyId === server.id
+          {filteredServers.map((server) => {
+            const busy = busyId != null
             const open = expanded === server.id
             return (
               <li className={styles.card} key={server.id}>
                 <div className={styles.cardHead}>
-                  <button
-                    type="button"
-                    className={styles.cardTitle}
-                    aria-expanded={open}
-                    onClick={() => setExpanded(open ? null : server.id)}
-                  >
-                    <span className={styles.cardName}>{server.id}</span>
-                    <span className={styles.cardCommand}>
-                      {server.transport === 'stdio'
-                        ? `${server.command} ${server.args.join(' ')}`.trim()
-                        : (server.url ?? server.transport)}
-                    </span>
-                  </button>
+                  <div className={styles.serverIcon}><Plug size={21} aria-hidden="true" /></div>
+                  <div className={styles.cardTitle}>
+                    <h3 className={styles.cardName}>{server.id}</h3>
+                    <span className={styles.transport}>{server.transport}</span>
+                  </div>
                   <div className={styles.cardMeta}>
                     <Badge
                       tone={
@@ -795,16 +841,29 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
                           ? t('mcpStatusError')
                           : t('mcpStatusDisabled')}
                     </Badge>
-                    <span className={styles.toolCount}>
-                      {t('mcpToolCount', { count: server.tools.filter((x) => x.enabled).length })}
-                    </span>
                   </div>
                 </div>
+
+                <p className={styles.cardCommand} title={maskCommand(server)}>
+                  {maskCommand(server)}
+                </p>
+                <button
+                  type="button"
+                  className={styles.detailsToggle}
+                  aria-expanded={open}
+                  aria-controls={`mcp-tools-${server.id}`}
+                  onClick={() => setExpanded(open ? null : server.id)}
+                >
+                  <span className={styles.toolCount}>
+                    {server.tools.filter((tool) => tool.enabled).length} / {server.tools.length} 个工具已启用
+                  </span>
+                  <span>{open ? '收起工具' : '查看工具'} <CaretDown size={13} className={open ? styles.chevronOpen : undefined} aria-hidden="true" /></span>
+                </button>
 
                 {server.error && <p className={styles.serverError}>{server.error}</p>}
 
                 {open && (
-                  <div className={styles.cardBody}>
+                  <div className={styles.cardBody} id={`mcp-tools-${server.id}`}>
                     {server.envKeys.length > 0 && (
                       <p className={styles.meta}>
                         {t('mcpEnvKeys')}: {server.envKeys.join('、')}
@@ -825,7 +884,7 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
                               <input
                                 type="checkbox"
                                 checked={tool.enabled}
-                                disabled={busyId === `${server.id}/${tool.name}`}
+                                disabled={busy}
                                 onChange={(event) =>
                                   void toggleTool(server.id, tool.name, event.target.checked)
                                 }
@@ -868,7 +927,7 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
                     disabled={busy}
                     onClick={() => void runServerAction(server.id, 'reconnect')}
                   >
-                    {busy ? t('loading') : t('mcpReconnect')}
+                    {busyId === server.id ? t('loading') : t('mcpReconnect')}
                   </Button>
                   <Button small disabled={busy} onClick={() => startEdit(server)}>
                     {t('edit')}

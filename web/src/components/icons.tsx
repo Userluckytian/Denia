@@ -67,6 +67,17 @@ function StrokeSvg({ children, ...props }: IconProps & { children: ReactNode }) 
   )
 }
 
+export function IconExtensions(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <rect x="2" y="2" width="4.5" height="4.5" rx="1" />
+      <rect x="2" y="9.5" width="4.5" height="4.5" rx="1" />
+      <rect x="9.5" y="9.5" width="4.5" height="4.5" rx="1" />
+      <path d="M11.75 2v4.5M9.5 4.25H14" />
+    </StrokeSvg>
+  )
+}
+
 export function IconTerminal(props: IconProps) {
   return (
     <StrokeSvg {...props}>

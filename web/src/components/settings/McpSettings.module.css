@@ -1,16 +1,84 @@
 /* MCP 设置面板。只用语义 token,暗/亮主题自动生效。 */
 
+.panel {
+  --mcp-gap: 16px;
+  --mcp-radius: 12px;
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.title {
+  margin: 0 0 8px;
+  color: var(--label-primary);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 240px;
+  padding: 0 12px;
+  border: 1px solid var(--border-l1);
+  border-radius: 8px;
+  background: var(--bg-layer-2);
+  color: var(--label-secondary);
+}
+
+.search input {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--label-primary);
+  font: inherit;
+  font-size: 13px;
+}
+
+.search:focus-within {
+  border-color: var(--accent);
+}
+
+.filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--label-secondary);
+  font-size: 12px;
+}
+
+.filter select {
+  min-height: 40px;
+  padding: 0 28px 0 12px;
+  border: 1px solid var(--border-l1);
+  border-radius: 8px;
+  background: var(--bg-layer-2);
+  color: var(--label-primary);
+  font: inherit;
+}
+
 .head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 14px;
+  margin-bottom: 24px;
 }
 
 .summary {
-  margin: 0 0 4px;
-  font-size: 13px;
+  margin: 10px 0 0;
+  font-size: 12px;
   font-weight: 650;
   color: var(--label-primary);
 }
@@ -92,17 +160,19 @@
 /* ---- 服务器卡片 ---- */
 
 .list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--mcp-gap);
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
 .card {
-  padding: 12px 14px;
-  border-radius: 12px;
+  min-width: 0;
+  padding: 20px;
+  border-radius: var(--mcp-radius);
   border: 1px solid var(--border-l1);
   background: var(--bg-layer-2);
 }
@@ -114,32 +184,89 @@
   gap: 12px;
 }
 
+.serverIcon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--border-l1);
+  border-radius: 10px;
+  background: var(--bg-layer-1);
+  color: var(--label-secondary);
+}
+
 .cardTitle {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
-  padding: 0;
-  border: none;
-  background: none;
-  text-align: left;
-  cursor: pointer;
-  font-family: inherit;
+}
+
+.transport {
+  color: var(--label-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .cardName {
-  font-size: 13.5px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 15px;
   font-weight: 650;
   color: var(--label-primary);
 }
 
 .cardCommand {
+  margin: 18px 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-layer-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--label-tertiary);
+  font-size: 12px;
+  color: var(--label-secondary);
+}
+
+.detailsToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--label-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.detailsToggle > span:last-child {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.detailsToggle:hover {
+  color: var(--label-primary);
+}
+
+.detailsToggle:focus-visible,
+.filter select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
 }
 
 .cardMeta {
@@ -173,6 +300,7 @@
 }
 
 .meta {
+  overflow-wrap: anywhere;
   margin: 0 0 8px;
   font-size: 11.5px;
   color: var(--label-tertiary);
@@ -193,6 +321,7 @@
 }
 
 .tool {
+  overflow-wrap: anywhere;
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -226,7 +355,9 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
+  padding-top: 16px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border-l1);
 }
 
 /* ---- 对话框(新建/编辑) ---- */
@@ -440,6 +571,45 @@
 .jsonTextarea:focus-visible {
   border-color: var(--accent-tint);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+@container (max-width: 680px) {
+  .list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .head {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 600px) {
+  .modalBackdrop {
+    padding: 12px;
+  }
+
+  .modal {
+    max-height: calc(100dvh - 24px);
+  }
+
+  .modalHead {
+    flex-wrap: wrap;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  .detailsToggle,
+  .actions button {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modeBtn {
+    transition: none;
+  }
 }
 
 .modalActions {

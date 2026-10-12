@@ -1,6 +1,8 @@
 //! dsh 式分层技能发现：项目 > 自定义 > 用户；正文只在调用时读取。
 use serde::{Deserialize, Serialize};
 
+pub mod management;
+
 type CachedSkill = (u64, std::time::SystemTime, String, Skill);
 static SUMMARY_CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, CachedSkill>>> =
     std::sync::OnceLock::new();
@@ -162,15 +164,28 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
 }
 
 pub fn discover(home: &Path, cwd: &Path) -> Result<Vec<Skill>, String> {
-    let project = cwd
-        .ancestors()
-        .find(|p| p.join(".git").exists())
-        .unwrap_or(cwd);
-    let mut roots = vec![
-        (project.join(".denia/skills"), "project-denia"),
-        (project.join(".dsh/skills"), "project-dsh"),
-        (project.join(".agents/skills"), "project-agents"),
-    ];
+    let disabled = management::disabled(home)?;
+    Ok(discover_all(home, Some(cwd))?
+        .into_iter()
+        .filter(|skill| !disabled.contains(&management::identity(skill)))
+        .collect())
+}
+
+pub(super) fn discover_all(home: &Path, cwd: Option<&Path>) -> Result<Vec<Skill>, String> {
+    let project = cwd.map(|cwd| {
+        cwd.ancestors()
+            .find(|p| p.join(".git").exists())
+            .unwrap_or(cwd)
+    });
+    let mut roots = project
+        .map(|project| {
+            vec![
+                (project.join(".denia/skills"), "project-denia"),
+                (project.join(".dsh/skills"), "project-dsh"),
+                (project.join(".agents/skills"), "project-agents"),
+            ]
+        })
+        .unwrap_or_default();
     roots.push((home.join("skills"), "user-denia"));
     let mut found = BTreeMap::new();
     for (root, source) in roots {

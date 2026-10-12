@@ -47,6 +47,38 @@ struct ServerBody {
     /// OCC:写入 settings 用。省略时按当前 revision 写入。
     #[serde(default)]
     expected_revision: Option<u64>,
+    #[serde(default)]
+    preserve_secrets: bool,
+}
+
+fn merge_server(
+    existing: &McpServerConfig,
+    mut incoming: McpServerConfig,
+    preserve: bool,
+) -> McpServerConfig {
+    if preserve {
+        let mut env = existing.env.clone();
+        env.extend(
+            incoming
+                .env
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty()),
+        );
+        incoming.env = env;
+        let mut headers = existing.headers.clone();
+        headers.extend(
+            incoming
+                .headers
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty()),
+        );
+        incoming.headers = headers;
+        incoming.scope = existing.scope.clone();
+        incoming.workspace_id = existing.workspace_id.clone();
+        incoming.protocol_version = existing.protocol_version.clone();
+        incoming.call_timeout_ms = existing.call_timeout_ms;
+    }
+    incoming
 }
 
 async fn upsert_server(
@@ -67,7 +99,7 @@ async fn upsert_server(
         .iter_mut()
         .find(|server| server.id == body.server.id)
     {
-        Some(existing) => *existing = body.server,
+        Some(existing) => *existing = merge_server(existing, body.server, body.preserve_secrets),
         None => config.servers.push(body.server),
     }
     write_settings(&state, &config, expected).await?;
@@ -236,3 +268,43 @@ struct McpDescribeResponse {
 /// 编译期锚定:`McpRuntime` 是本端点的唯一入口,防止重构后漏改。
 #[allow(dead_code)]
 fn _runtime_witness(_runtime: &McpRuntime) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn editing_can_preserve_secrets_and_hidden_fields() {
+        let existing: McpServerConfig = serde_json::from_value(json!({
+            "id":"example", "command":"old", "env":{"TOKEN":"secret", "KEEP":"keep"},
+            "headers":{"Authorization":"old-secret", "X-Keep":"keep"},
+            "workspaceId":"workspace", "protocolVersion":"custom", "callTimeoutMs":1234
+        }))
+        .unwrap();
+        let incoming: McpServerConfig = serde_json::from_value(json!({
+            "id":"example", "command":"new", "env":{"TOKEN":"", "NEW":"value"},
+            "headers":{"Authorization":"new-secret", "X-Keep":""}
+        }))
+        .unwrap();
+        let merged = merge_server(&existing, incoming.clone(), true);
+        assert_eq!(merged.command, "new");
+        assert_eq!(merged.env["TOKEN"], "secret");
+        assert_eq!(merged.env["KEEP"], "keep");
+        assert_eq!(merged.env["NEW"], "value");
+        assert_eq!(merged.headers["Authorization"], "new-secret");
+        assert_eq!(merged.headers["X-Keep"], "keep");
+        assert_eq!(merged.workspace_id, existing.workspace_id);
+        assert_eq!(merged.protocol_version, existing.protocol_version);
+        assert_eq!(merged.call_timeout_ms, existing.call_timeout_ms);
+        assert_eq!(
+            serde_json::to_value(merged.scope).unwrap(),
+            serde_json::to_value(existing.scope).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(merge_server(&existing, incoming.clone(), false)).unwrap(),
+            serde_json::to_value(incoming).unwrap()
+        );
+        let body: ServerBody =
+            serde_json::from_value(json!({"server":{"id":"example", "command":"new"}})).unwrap();
+        assert!(!body.preserve_secrets);
+    }
+}

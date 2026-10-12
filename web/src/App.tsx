@@ -4,6 +4,8 @@ import { setLocale, t } from './i18n'
 import { relativeTime } from './relativeTime'
 import { subscribeServerEvents, subscribeServerStatus } from './serverEvents'
 import SessionsPage from './pages/SessionsPage'
+import { readCollapsedChildren, writeCollapsedChildren, restoredSidebarSession } from './sidebarMemory'
+import { extensionTabFromHash, type ExtensionTab } from './extensionsRoute'
 import * as api from './api'
 import {
   addSessionLocal,
@@ -57,6 +59,7 @@ import {
   IconPanelClose,
   IconPanelOpen,
   IconNewSession,
+  IconExtensions,
   IconSessionSearch,
   IconTrash,
 } from './components/icons'
@@ -71,6 +74,7 @@ const LazySettingsModal = lazy(() =>
   import('./components/SettingsModal').then((module) => ({ default: module.SettingsModal })),
 )
 const LazyBrowserPanel = lazy(() => import('./components/BrowserPanel'))
+const LazyExtensionsPage = lazy(() => import('./pages/ExtensionsPage'))
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -98,6 +102,14 @@ export default function App() {
   const runningIds = useRunningIds()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [extensionTab, setExtensionTab] = useState<ExtensionTab | null>(() => extensionTabFromHash(window.location.hash))
+  const openExtensions = useCallback((tab: ExtensionTab = 'skills') => {
+    setExtensionTab(tab)
+    window.location.hash = `extensions/${tab}`
+  }, [])
+  const leaveExtensions = useCallback(() => {
+    setExtensionTab(null)
+  }, [])
   // 浏览器侧栏编排(会话绑定 / 收尾自动销毁 / 刷新恢复)全部在 hook 内。
   // 面板标签现在统一由 SidePane 承载,所以这里只用它的 `userClose`
   // 把"用户手动收起浏览器"这个意图转达给 hook(停止 AI 自动重开)。
@@ -468,14 +480,17 @@ export default function App() {
       firstRenderRef.current = false
       return
     }
-    const target = activeId === null ? '' : `#s=${encodeURIComponent(activeId)}`
+    const target = extensionTab ? `#extensions/${extensionTab}` : activeId === null ? '' : `#s=${encodeURIComponent(activeId)}`
     if (window.location.hash !== target) {
       window.history.replaceState(null, '', target || window.location.pathname)
     }
-  }, [activeId])
+  }, [activeId, extensionTab])
 
   useEffect(() => {
     const onHashChange = () => {
+      const tab = extensionTabFromHash(window.location.hash)
+      setExtensionTab(tab)
+      if (tab) return
       const match = window.location.hash.match(/^#s=([^#]+)$/)
       const id = match ? decodeURIComponent(match[1]) : null
       if (id === null) {
@@ -581,6 +596,7 @@ export default function App() {
 
   const startSession = useCallback(
     async (targetWsId?: string) => {
+      leaveExtensions()
       const activeWs = getActiveWorkspace()
       const target =
         workspaces.find((w) => w.id === targetWsId) ??
@@ -614,7 +630,7 @@ export default function App() {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [workspaces, activeSession, recentWorkspace],
+    [workspaces, activeSession, recentWorkspace, leaveExtensions],
   )
 
   /* ---- 目录流入口 ---- */
@@ -732,6 +748,7 @@ export default function App() {
 
   const openSession = useCallback(
     (id: string, wsId?: string) => {
+      setExtensionTab(null)
       setActiveId(id, wsId ?? null)
       // 手机上选中会话后自动收起抽屉 —— 否则用户点完还得再点一次遮罩
       // 才能看到刚打开的对话。
@@ -796,14 +813,20 @@ export default function App() {
                 <IconPanelClose size={16} />
               </button>
             </div>
+            <nav className="sidebar-primary" aria-label={t('newSession')}>
             <button
               type="button"
               className="sidebar-new-btn"
               onClick={() => void startSession()}
             >
-              <IconNewSession size={14} />
-              {t('newSession')}
+              <IconNewSession size={16} />
+              <span>{t('newSession')}</span>
             </button>
+            <button type="button" className={`sidebar-new-btn sidebar-extensions-btn${extensionTab ? ' active' : ''}`}
+              aria-current={extensionTab ? 'page' : undefined} onClick={() => openExtensions()}>
+              <IconExtensions size={16} /><span>{t('extensionsTitle')}</span>
+            </button>
+            </nav>
             <div className="sidebar-region">
               <div className="sidebar-region-head">
                 <span className="label">{t('workspacesTitle')}</span>
@@ -841,7 +864,7 @@ export default function App() {
               <SidebarWorkspaces
                 sessions={sessions}
                 workspaces={workspaces}
-                activeId={activeId}
+                activeId={extensionTab ? null : activeId}
                 runningIds={runningIds}
                 searchOpen={sidebarSearchOpen}
                 onSearchOpenChange={setSidebarSearchOpen}
@@ -883,12 +906,17 @@ export default function App() {
             </div>
             <button
               type="button"
-              className="rail-btn accent"
+              className="rail-btn"
               title={t('newSession')}
               aria-label={t('newSession')}
               onClick={() => void startSession()}
             >
               <IconNewSession size={16} />
+            </button>
+            <button type="button" className={`rail-btn${extensionTab ? ' accent' : ''}`}
+              aria-label={t('extensionsTitle')} title={t('extensionsTitle')}
+              aria-current={extensionTab ? 'page' : undefined} onClick={() => { openExtensions(); setDrawerOpen(false) }}>
+              <IconExtensions size={18} />
             </button>
             <button
               type="button"
@@ -947,7 +975,11 @@ export default function App() {
         <RemoteBanner local={localClient} />
         <div className="main-row">
           <div className="page-pane">
-            <SessionsPage
+            {extensionTab ? (
+              <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
+                <LazyExtensionsPage tab={extensionTab} cwd={paneWorkspacePath ?? undefined} onTabChange={openExtensions} notify={notify} />
+              </Suspense>
+            ) : <SessionsPage
               key={activeId ?? 'draft'}
               activeId={activeId}
               locked={locked}
@@ -975,12 +1007,12 @@ export default function App() {
                 }
                 pane.toggle()
               }}
-            />
+            />}
           </div>
           {/* 侧边面板在手机上不渲染:390px 宽放不下「对话 + 面板」两列,
               面板会把自己挤成一条缝,还会把主列的输入区顶出屏幕。
               手机用户要终端/文件,用抽屉里的入口或直接开新会话更实际。 */}
-          {!isMobile && (
+          {!isMobile && !extensionTab && (
           <SidePane
             sessionId={activeId}
             state={pane.state}
@@ -1185,7 +1217,9 @@ function SidebarWorkspaces({
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
   // 血缘折叠:sessionId → 是否收起其后代子树(默认展开)。
-  const [collapsedChildren, setCollapsedChildren] = useState<Record<string, boolean>>({})
+  const [collapsedChildren, setCollapsedChildren] = useState(readCollapsedChildren)
+  const revealedSessionRef = useRef(restoredSidebarSession(activeId))
+  useEffect(() => { writeCollapsedChildren(collapsedChildren) }, [collapsedChildren])
   // 行尾相对时间的时钟;60s 一跳足够分钟级分桶。
   const [now, setNow] = useState(() => Date.now())
   const [query, setQuery] = useState('')
@@ -1289,9 +1323,10 @@ function SidebarWorkspaces({
     return () => window.clearInterval(id)
   }, [])
 
-  // 活动会话的折叠祖先自动展开,保证侧栏始终可见当前会话。
+  // 仅切换会话时展开祖先；刷新恢复与列表推送不覆盖用户的折叠选择。
   useEffect(() => {
-    if (!activeId) return
+    if (!activeId || activeId === revealedSessionRef.current || !sessionsById.has(activeId)) return
+    revealedSessionRef.current = activeId
     setCollapsedChildren((prev) => {
       let changed = false
       const next = { ...prev }
