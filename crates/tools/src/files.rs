@@ -15,7 +15,6 @@ use async_trait::async_trait;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
-use crate::file_evidence::{FileEvidence, Fingerprint, SnapshotStamp};
 use crate::support::{parse_tool_args, tool_error};
 use crate::{ExecutionReport, Tool, ToolContext, ToolOutput, end_reason, resolve_within};
 
@@ -257,24 +256,11 @@ impl Tool for ReadFileTool {
             && looks_like_image(header)
         {
             let path_for_image = path.clone();
-            let data = tokio::task::spawn_blocking(move || {
-                let before = SnapshotStamp::of(&path_for_image);
-                let data = std::fs::read(&path_for_image)?;
-                let mut fingerprint = Fingerprint::new();
-                fingerprint.update(&data);
-                let evidence = FileEvidence::read(
-                    &path_for_image,
-                    fingerprint,
-                    before,
-                    SnapshotStamp::of(&path_for_image),
-                    true,
-                );
-                Ok::<_, std::io::Error>((data, evidence))
-            })
-            .await
-            .ok()
-            .and_then(|result| result.ok());
-            if let Some((data, evidence)) = data
+            let data = tokio::task::spawn_blocking(move || std::fs::read(&path_for_image))
+                .await
+                .ok()
+                .and_then(|result| result.ok());
+            if let Some(data) = data
                 && let Some((mime, width, height)) = sniff_image(&data)
             {
                 if !ctx.vision_supported {
@@ -312,7 +298,7 @@ impl Tool for ReadFileTool {
                     mime,
                     dimension,
                     data.len()
-                )).with_report(evidence.report());
+                ));
             }
         }
         // 文本文件:按行读取 offset/limit;字符级预算由落盘层统一兜底。
@@ -348,7 +334,7 @@ impl Tool for ReadFileTool {
             tokio::task::spawn_blocking(move || read_lines(&path, offset, limit)).await
         };
         match read {
-            Ok(Ok((lines, truncated_lines, evidence))) => {
+            Ok(Ok((lines, truncated_lines))) => {
                 let count = lines.len();
                 let end = if count == 0 {
                     args.offset
@@ -384,11 +370,7 @@ impl Tool for ReadFileTool {
                 }
                 .ok()
                 .flatten();
-                if let (Some(shared), Some(stamp)) = (ctx.read_state.as_ref(), fresh_stamp)
-                    && evidence.snapshot_reliable
-                    && evidence.size_bytes == Some(stamp.size_bytes)
-                    && evidence.mtime_ms == stamp.mtime_ms
-                {
+                if let (Some(shared), Some(stamp)) = (ctx.read_state.as_ref(), fresh_stamp) {
                     // 单行被截断意味着内容不完整,标记为部分视图(不得作为写依据)。
                     let is_partial_view = truncated_lines > 0;
                     let is_full_read = args.offset <= 1 && reached_eof && !is_partial_view;
@@ -412,7 +394,7 @@ impl Tool for ReadFileTool {
                         state.record(read_key, entry);
                     }
                 }
-                ToolOutput::text(content).with_report(evidence.report())
+                ToolOutput::text(content)
             }
             Ok(Err(message)) => tool_error(
                 format!("读取 {} 失败:{message}", args.path),
@@ -428,52 +410,28 @@ fn read_lines(
     path: &std::path::Path,
     offset: u64,
     limit: u64,
-) -> Result<(Vec<String>, usize, FileEvidence), String> {
-    let before = SnapshotStamp::of(path);
+) -> Result<(Vec<String>, usize), String> {
     let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut reader = BufReader::new(file);
-    let mut fingerprint = Fingerprint::new();
-    let mut lines = Vec::new();
+    let reader = BufReader::new(file);
+    let mut lines: Vec<String> = Vec::new();
     let mut truncated_lines = 0usize;
-    let mut current = 0u64;
-    let mut buffer = Vec::new();
-    loop {
-        buffer.clear();
-        if reader
-            .read_until(b'\n', &mut buffer)
-            .map_err(|error| error.to_string())?
-            == 0
-        {
-            break;
-        }
-        fingerprint.update(&buffer);
+    let mut current: u64 = 0;
+    for line in reader.lines() {
         current += 1;
-        if current < offset || lines.len() as u64 >= limit {
+        if current < offset {
             continue;
         }
-        if buffer.last() == Some(&b'\n') {
-            buffer.pop();
-            if buffer.last() == Some(&b'\r') {
-                buffer.pop();
-            }
+        if lines.len() as u64 >= limit {
+            break;
         }
-        let text = std::str::from_utf8(&buffer).map_err(|error| error.to_string())?;
-        let guarded = guard_line(text);
+        let text = line.map_err(|error| error.to_string())?;
+        let guarded = guard_line(&text);
         if guarded.len() != text.len() {
             truncated_lines += 1;
         }
         lines.push(guarded);
     }
-    let mut evidence = FileEvidence::read(
-        path,
-        fingerprint,
-        before,
-        SnapshotStamp::of(path),
-        truncated_lines == 0,
-    );
-    evidence.offset = Some(offset);
-    evidence.limit = Some(limit);
-    Ok((lines, truncated_lines, evidence))
+    Ok((lines, truncated_lines))
 }
 
 /// Overwrites one UTF-8 text file in the session workspace.
@@ -634,14 +592,10 @@ impl Tool for WriteFileTool {
         let write = {
             let path = path.clone();
             let content = args.content.clone();
-            tokio::task::spawn_blocking(move || {
-                std::fs::write(&path, content.as_bytes())?;
-                Ok::<_, std::io::Error>(FileEvidence::written(&path, "write", content.as_bytes()))
-            })
-            .await
+            tokio::task::spawn_blocking(move || std::fs::write(&path, content.as_bytes())).await
         };
         match write {
-            Ok(Ok(evidence)) => {
+            Ok(Ok(())) => {
                 // 写入成功后刷新读状态:文件内容已变成我们写进去的样子,
                 // 模型接着 Edit 同一文件时不会因写前校验而要求重读。
                 if let Some(shared) = ctx.read_state.as_ref() {
@@ -663,7 +617,6 @@ impl Tool for WriteFileTool {
                     args.content.len(),
                     args.path
                 ))
-                .with_report(evidence.report())
             }
             Ok(Err(error)) => tool_error(
                 format!("写入 {} 失败:{error}", args.path),
@@ -702,58 +655,6 @@ mod tests {
             read_state: None,
         };
         (tempfile_like::TempDir(dir), context)
-    }
-
-    #[tokio::test]
-    async fn file_evidence_tracks_versions_ranges_and_cache_hits() {
-        let (_dir, mut ctx) = workspace();
-        ctx.read_state = Some(Arc::new(std::sync::Mutex::new(
-            crate::read_state::ReadState::default(),
-        )));
-        let write = WriteFileTool::new()
-            .execute(r#"{"path":"evidence.txt","content":"one\ntwo\n"}"#, &ctx)
-            .await;
-        let written = write.report.unwrap().file_evidence.unwrap();
-        assert_eq!(written.operation, "write");
-        let args = r#"{"path":"evidence.txt","offset":2,"limit":1}"#;
-        let read = ReadFileTool::new().execute(args, &ctx).await;
-        let evidence = read.report.unwrap().file_evidence.unwrap();
-        assert_eq!(evidence.fingerprint, written.fingerprint);
-        assert_eq!(
-            evidence.path,
-            crate::coordination::lock_key(&ctx.cwd.join("evidence.txt")).to_string_lossy()
-        );
-        assert_eq!((evidence.offset, evidence.limit), (Some(2), Some(1)));
-        assert!(evidence.complete && evidence.snapshot_reliable);
-        let cached = ReadFileTool::new().execute(args, &ctx).await;
-        assert!(cached.report.is_none());
-        let edited = crate::EditTool::new()
-            .execute(
-                r#"{"path":"evidence.txt","old_string":"two","new_string":"three"}"#,
-                &ctx,
-            )
-            .await;
-        let edited = edited.report.unwrap().file_evidence.unwrap();
-        assert_eq!(edited.operation, "edit");
-        assert_ne!(edited.fingerprint, written.fingerprint);
-        let report = serde_json::to_value(edited.report()).unwrap();
-        assert!(report["fileEvidence"]["sizeBytes"].is_number());
-        assert!(report["fileEvidence"]["snapshotReliable"].is_boolean());
-    }
-
-    #[tokio::test]
-    async fn file_evidence_marks_truncation_and_omits_failures() {
-        let (_dir, ctx) = workspace();
-        std::fs::write(ctx.cwd.join("long.txt"), "a".repeat(MAX_LINE_CHARS + 1)).unwrap();
-        let read = ReadFileTool::new()
-            .execute(r#"{"path":"long.txt"}"#, &ctx)
-            .await;
-        assert!(!read.report.unwrap().file_evidence.unwrap().complete);
-        let failed = WriteFileTool::new()
-            .execute(r#"{"path":".","content":"no"}"#, &ctx)
-            .await;
-        assert!(failed.is_error);
-        assert!(failed.report.is_none());
     }
 
     mod tempfile_like {

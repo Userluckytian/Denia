@@ -33,7 +33,7 @@ pub struct SystemPromptState {
 
 impl SystemPromptState {
     /// 启动时从磁盘加载;空或缺失则沿用出厂 persona。
-    /// `api_base` 是本实例 HTTP API 地址(如 `http://127.0.0.1:3601`),
+    /// `api_base` 是本实例 HTTP API 地址(如 `http://127.0.0.1:43655`),
     /// 注入 runtime-context 快照;None = 无 API 部署(测试),不注入。
     pub fn load(
         home: &Path,
@@ -374,7 +374,7 @@ mod tests {
 
     /// 本实例 API 地址随 runtime-context 快照注入:模型改配置必须打自己
     /// 所在的进程——数据目录共享时猜端口会把配置写进别的实例(实测缺陷:
-    /// 3601 会话接 MCP 却写了 3600,面板毫无变化)。
+    /// 43655 会话接 MCP 却写了 43654,面板毫无变化)。
     #[test]
     fn instance_api_base_reaches_the_runtime_snapshot() {
         let prompt = build_prompt(
@@ -382,12 +382,12 @@ mod tests {
             None,
             None,
             None,
-            Some("http://127.0.0.1:3601".to_string()),
+            Some("http://127.0.0.1:43655".to_string()),
         );
         let assembly = prompt.assemble(&AssembleContext::default()).unwrap();
         let snapshot = denia_system_prompt::render_context_snapshot(&assembly);
         assert!(
-            snapshot.contains("http://127.0.0.1:3601"),
+            snapshot.contains("http://127.0.0.1:43655"),
             "runtime-context 快照必须带本实例 API:{snapshot}"
         );
 

@@ -32,8 +32,6 @@ mod rescue;
 mod runtime_context;
 mod turn;
 mod workspace_instructions;
-mod workbench;
-mod workbench_runtime;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -114,7 +112,7 @@ pub trait ApprovalBridge: Send + Sync {
 /// 执行预算策略:上限来源(按 turn 读取一致快照)+ 账本时钟。
 ///
 /// 上限来源由宿主装配(`server` 从运行时配置读),未装即用
-/// [`ExecutionLimits::default`](128 步 / 256 次请求 / 60 分钟)。
+/// [`ExecutionLimits::default`](默认不限,0 = 关闭对应边界)。
 #[derive(Default)]
 struct BudgetPolicy {
     limits: Option<Arc<dyn Fn() -> ExecutionLimits + Send + Sync>>,
@@ -296,7 +294,7 @@ pub struct SessionDriver {
     /// 运行时内存态:进程重启或会话淘汰后回到轻量态,重新装载即可。
     mcp_loads:
         std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
-    /// 执行预算:上限来源与时钟(默认 128 步 / 256 次请求 / 60 分钟)。
+    /// 执行预算:上限来源与时钟(默认不限)。
     budget_policy: std::sync::RwLock<BudgetPolicy>,
     /// 按会话登记的当前 turn 账本(审批/提问等待期间暂停计时)。
     turn_budgets: TurnBudgets,

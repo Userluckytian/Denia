@@ -22,7 +22,7 @@ permission mode: read-only, auto-edit, plan or full.
 
 ## Development
 
-`cargo run -p denia-server` serves the console at http://127.0.0.1:3600.
+`cargo run -p denia-server` serves the console at http://127.0.0.1:43654.
 Run `pnpm dev` inside `web` for the Vite development server.
 
 State lives under `DENIA_HOME`, defaulting to `~/.denia`. A running host holds an

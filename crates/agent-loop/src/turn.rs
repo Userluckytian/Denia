@@ -1549,10 +1549,10 @@ mod budget_tests {
 
     #[test]
     fn bypass_sources_stay_out_of_the_user_budget() {
-        // 会话标题、连通测试、git 摘要不是用户任务的执行成本:额度为 0 时
-        // 它们照样放行,用户请求照样被拒。
+        // 会话标题、连通测试、git 摘要不是用户任务的执行成本:它们照样放行,
+        // 且不占用用户预算额度。
         let budget = ExecutionBudget::new(ExecutionLimits {
-            max_requests: 0,
+            max_requests: 1,
             ..ExecutionLimits::unbounded()
         });
         let gate = crate::BudgetGate(budget.clone());
@@ -1582,10 +1582,20 @@ mod budget_tests {
             sequence: 1,
             attempt: 1,
         };
-        let refusal = gate.admit(&user).expect_err("用户请求额度为 0,必须被拒");
+        // 旁路没占额度:第一次用户请求放行。
+        assert!(gate.admit(&user).is_ok());
+        let user_retry = denia_llm::RequestCall {
+            session: "s1".to_string(),
+            turn: 1,
+            step: 1,
+            kind: denia_llm::RequestKind::UserStep,
+            sequence: 1,
+            attempt: 2,
+        };
+        let refusal = gate.admit(&user_retry).expect_err("第二次用户请求必须撞上限");
         assert!(refusal.message.contains("执行预算已用尽"));
         let counters = budget.counters();
-        assert_eq!(counters.metered_requests, 0, "旁路不吃用户预算");
+        assert_eq!(counters.metered_requests, 1, "旁路不吃用户预算");
         assert_eq!(counters.bypass_requests, 3, "旁路只累计观测计数");
     }
 

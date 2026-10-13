@@ -394,7 +394,7 @@ impl ExecutionBudget {
         if state.seen.contains(call) {
             return Ok(state.metered_requests);
         }
-        if state.metered_requests >= state.limits.max_requests {
+        if state.limits.max_requests != 0 && state.metered_requests >= state.limits.max_requests {
             let limit = state.limits.max_requests;
             return Err(BudgetRefusal::new(
                 BudgetBoundary::Requests,
@@ -433,14 +433,27 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_the_protection_baseline() {
+    fn defaults_are_unbounded() {
         let limits = ExecutionLimits::default();
-        assert_eq!(limits.max_steps, 128);
-        assert_eq!(limits.max_requests, 256);
-        assert_eq!(limits.max_active_ms, 60 * 60 * 1_000);
+        assert_eq!(limits, ExecutionLimits::unbounded());
         let budget = ExecutionBudget::new(limits);
         assert_eq!(budget.metering_version(), EXECUTION_METERING_VERSION);
         assert_eq!(budget.limits(), limits);
+    }
+
+    #[test]
+    fn zero_disables_all_boundaries() {
+        let budget = ExecutionBudget::new(ExecutionLimits {
+            max_steps: 0,
+            max_requests: 0,
+            max_active_ms: 0,
+        });
+        for _ in 0..5 {
+            assert!(budget.admit_step().is_ok());
+            assert!(budget
+                .admit_request(&metered(RequestKind::Step, 1))
+                .is_ok());
+        }
     }
 
     #[test]
@@ -535,7 +548,7 @@ mod tests {
     #[test]
     fn bypass_calls_never_consume_the_user_budget() {
         let budget = ExecutionBudget::new(ExecutionLimits {
-            max_requests: 0,
+            max_requests: 1,
             ..ExecutionLimits::unbounded()
         });
         for kind in [
@@ -556,10 +569,15 @@ mod tests {
         let counters = budget.counters();
         assert_eq!(counters.metered_requests, 0, "旁路不计入用户预算");
         assert_eq!(counters.bypass_requests, 3, "旁路只累计观测计数");
-        // 同样的额度下,用户请求仍然被拦住。
+        // 旁路没占额度:用户第一次请求放行,第二次才撞上限。
         assert!(
             budget
                 .admit_request(&metered(RequestKind::Step, 1))
+                .is_ok()
+        );
+        assert!(
+            budget
+                .admit_request(&metered(RequestKind::Step, 2))
                 .is_err()
         );
     }

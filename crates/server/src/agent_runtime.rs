@@ -99,16 +99,14 @@ pub struct GoalsConfig {
     /// 连续执行失败(Error/LoopDetected)达到该次数即标记 blocked
     /// (codex `stop_active_goal_after_repeated_execution_failures`)。
     pub max_consecutive_failures: u32,
-    /// 执行预算:一个 turn 内允许的模型步骤上限(默认 128)。
+    /// 执行预算:一个 turn 内允许的模型步骤上限(0 = 不限,默认不限)。
     ///
     /// 归在 goals 命名空间下而不是新建一个:命名空间注册在 `state.rs`。
-    /// 执行预算本就是目标执行策略的一部分——它护栏的正是“目标续跑把一整轮
-    /// 跑飞”这个失效模式。
     pub max_execution_steps: u64,
-    /// 执行预算:一个 turn 内的物理请求尝试上限(默认 256;含注册表内部
+    /// 执行预算:一个 turn 内的物理请求尝试上限(0 = 不限;含注册表内部
     /// 重试、流重试、续写与压缩请求)。
     pub max_execution_requests: u64,
-    /// 执行预算:一个 turn 的主动执行时间上限,毫秒(默认 60 分钟;
+    /// 执行预算:一个 turn 的主动执行时间上限,毫秒(0 = 不限;
     /// 等待用户审批/提问的区间已排除)。
     pub max_execution_active_ms: u64,
 }
@@ -118,9 +116,9 @@ impl Default for GoalsConfig {
             max_goal_token_budget: 10_000_000,
             max_rounds: 256,
             max_consecutive_failures: 3,
-            max_execution_steps: 128,
-            max_execution_requests: 256,
-            max_execution_active_ms: 3_600_000,
+            max_execution_steps: 0,
+            max_execution_requests: 0,
+            max_execution_active_ms: 0,
         }
     }
 }
@@ -150,7 +148,8 @@ struct Child {
 /// 从设置存储读执行预算上限。
 ///
 /// 驱动器每轮取一次快照(调用者把它包成一个限源):读失败或字段缺失都回退
-/// [`GoalsConfig::default`],即防护基线——预算闸门不会因为读不到配置而消失。
+/// [`GoalsConfig::default`](默认不限)。配置里 `0` = 关闭该道边界,映射成
+/// `u64::MAX`(与账本的 `0 = 不限` 等价,避免两层对“0”理解不一致)。
 fn execution_limits_from(
     settings: &denia_settings::SettingsStore,
 ) -> denia_agent_loop::ExecutionLimits {
@@ -159,10 +158,11 @@ fn execution_limits_from(
         .ok()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default();
+    let map = |v: u64| if v == 0 { u64::MAX } else { v };
     denia_agent_loop::ExecutionLimits {
-        max_steps: config.max_execution_steps,
-        max_requests: config.max_execution_requests,
-        max_active_ms: config.max_execution_active_ms,
+        max_steps: map(config.max_execution_steps),
+        max_requests: map(config.max_execution_requests),
+        max_active_ms: map(config.max_execution_active_ms),
     }
 }
 #[derive(Default)]
@@ -3149,7 +3149,7 @@ mod tests {
         let home =
             std::env::temp_dir().join(format!("denia-runtime-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let state = crate::state::build_state(&home, false, 3600).await.unwrap();
+        let state = crate::state::build_state(&home, false, 43654).await.unwrap();
         state
             .registry
             .register(
@@ -5382,7 +5382,7 @@ mod tests {
         let home =
             std::env::temp_dir().join(format!("denia-memory-inject-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let state = crate::state::build_state(&home, false, 3600).await.unwrap();
+        let state = crate::state::build_state(&home, false, 43654).await.unwrap();
         let cwd = home.join("ws");
         std::fs::create_dir_all(&cwd).unwrap();
         let root = crate::project_memory::memory_root(&home, &cwd);
@@ -5954,11 +5954,11 @@ mod tests {
         std::fs::remove_dir_all(state.home.clone()).ok();
     }
     #[test]
-    fn execution_budget_config_keeps_the_protection_baseline() {
+    fn execution_budget_config_defaults_to_unlimited() {
         let defaults = GoalsConfig::default();
-        assert_eq!(defaults.max_execution_steps, 128);
-        assert_eq!(defaults.max_execution_requests, 256);
-        assert_eq!(defaults.max_execution_active_ms, 60 * 60 * 1_000);
+        assert_eq!(defaults.max_execution_steps, 0);
+        assert_eq!(defaults.max_execution_requests, 0);
+        assert_eq!(defaults.max_execution_active_ms, 0);
         assert!(validate_goals_config(json!({})).is_ok());
         // 0 = 显式关闭某一道边界(其余两道仍生效),允许。
         assert!(validate_goals_config(json!({"maxExecutionSteps": 0})).is_ok());
@@ -5971,12 +5971,12 @@ mod tests {
     #[tokio::test]
     async fn driver_reads_the_execution_budget_from_runtime_config() {
         let (state, _ctx) = setup().await;
-        // 上限来源已经装在驱动器上:默认值就是防护基线。
+        // 上限来源已经装在驱动器上:默认不限(0 映射成 u64::MAX)。
         assert_eq!(
             state.driver.execution_limits(),
             state.runtime.execution_limits()
         );
-        assert_eq!(state.driver.execution_limits().max_steps, 128);
+        assert_eq!(state.driver.execution_limits().max_steps, u64::MAX);
         // 改配置 → 下一次取快照就是新值(在途轮次保持自己的快照,由
         // `turn::budget_tests` 的边界测试钉住)。
         state
@@ -5984,7 +5984,7 @@ mod tests {
             .update("goals", json!({"maxExecutionSteps": 7}), None)
             .unwrap();
         assert_eq!(state.driver.execution_limits().max_steps, 7);
-        assert_eq!(state.runtime.execution_limits().max_requests, 256);
+        assert_eq!(state.runtime.execution_limits().max_requests, u64::MAX);
         std::fs::remove_dir_all(state.home.clone()).ok();
     }
 

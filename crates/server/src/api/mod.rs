@@ -38,7 +38,7 @@ use crate::state::AppState;
 ///
 /// 等级取 Fastest 而不是 Best:它坐在交互路径上,level 1 与 9 的体积只差一成
 /// 多,CPU 却差几十倍。"发一次、人人要下"的静态资源才值得最高档,那部分放在
-/// 构建期(scripts/precompress.mjs)。
+/// 构建期(web/scripts/precompress.mjs)。
 ///
 /// 两类响应必须排除:
 /// - **101 升级响应(WebSocket)**:套上压缩体会让 hyper 的 upgrade 流程读到

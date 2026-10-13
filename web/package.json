@@ -7,7 +7,7 @@
     "check:memory": "node scripts/check.mjs --memory",
     "dev": "vite",
     "check": "node scripts/check.mjs",
-    "build": "pnpm check && pnpm typecheck && vite build && node ../scripts/precompress.mjs",
+    "build": "pnpm check && pnpm typecheck && vite build && node scripts/precompress.mjs",
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false"
   },

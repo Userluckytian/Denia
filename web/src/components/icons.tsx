@@ -990,7 +990,7 @@ export function IconSearch(props: IconProps) {
 export function IconSessionSearch(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <path d="M8.5 2.5h-5A1.5 1.5 0 0 0 2 4v6a1.5 1.5 0 0 0 1.5 1.5H5V14l3-2.5" /><circle cx="11" cy="5.5" r="2.5" /><path d="m12.8 7.3 2 2M4.5 6h1.25" />
+      <g transform="scale(.8)" strokeWidth="1.4"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></g>
     </StrokeSvg>
   )
 }
@@ -999,7 +999,7 @@ export function IconSessionSearch(props: IconProps) {
 export function IconNewSession(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <path d="M7.5 2.5h-4A1.5 1.5 0 0 0 2 4v6a1.5 1.5 0 0 0 1.5 1.5H5V14l3-2.5h4.5A1.5 1.5 0 0 0 14 10V8.5M12 2v5M9.5 4.5h5" />
+      <path transform="scale(.8)" strokeWidth="1.4" d="M12 3H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 10l1-4 4-4 3 3-4 4-4 1Z" />
     </StrokeSvg>
   )
 }
@@ -1008,7 +1008,7 @@ export function IconNewSession(props: IconProps) {
 export function IconWorkspace(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <path d="M2 6V4.25C2 3.56 2.56 3 3.25 3h2.5l1.5 1.5h5.5c.69 0 1.25.56 1.25 1.25V6M2 6h12v5.75c0 .69-.56 1.25-1.25 1.25h-9.5C2.56 13 2 12.44 2 11.75V6ZM6 9h4" />
+      <path transform="scale(.8)" strokeWidth="1.4" d="M2.5 6V4.5h6l2 2h7v10h-15V6Z" />
     </StrokeSvg>
   )
 }

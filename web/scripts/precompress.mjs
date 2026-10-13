@@ -5,14 +5,19 @@
 // brotli q11 换最小体积,运行时零 CPU、零缓冲;服务端只按 Accept-Encoding
 // 选一个现成实体发出去(见 crates/server/src/web_assets.rs)。
 //
+// 位置:front-end 工具链目录(web/scripts),由 web/package.json 的 build 脚本
+// 调用。放在 web/ 内部才能让 `pnpm build` 不依赖仓库根的 scripts/ 目录。
+//
 // 跳过图片与字体:它们自身已压缩,再压一遍纯属浪费(woff2 内部已是 Brotli)。
 
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib'
 import { readdirSync, statSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 
-const REPO_ROOT = path.resolve(import.meta.dirname, '..')
-const DEFAULT_DIST = path.join(REPO_ROOT, 'web', 'dist')
+/** web/ 根目录(本脚本位于 web/scripts/)。 */
+const WEB_ROOT = path.resolve(import.meta.dirname, '..')
+/** vite build 的输出目录。 */
+const DEFAULT_DIST = path.join(WEB_ROOT, 'dist')
 
 /** 值得预压缩的文本类扩展名。 */
 const TEXT_EXTENSIONS = new Set([
@@ -58,6 +63,7 @@ function main() {
   let rawTotal = 0
   let brTotal = 0
   let gzTotal = 0
+  const produced = []
   for (const file of all) {
     if (/\.(br|gz)$/.test(file)) continue
     if (!TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())) continue
@@ -76,7 +82,10 @@ function main() {
     if (brotli.length < data.length) kept.push(['.br', brotli])
     if (gzip.length < data.length) kept.push(['.gz', gzip])
     if (kept.length === 0) continue
-    for (const [suffix, bytes] of kept) writeFileSync(file + suffix, bytes)
+    for (const [suffix, bytes] of kept) {
+      writeFileSync(file + suffix, bytes)
+      produced.push(suffix)
+    }
 
     count += 1
     rawTotal += data.length
@@ -84,7 +93,22 @@ function main() {
     gzTotal += Math.min(gzip.length, data.length)
   }
 
-  const kb = (n) => (n / 1024).toFixed(0)
+  // 落地校验:产物数量必须与预期一致。半截产物(压缩中途失败)比没有产物更难
+  // 排查 —— 服务端会静默回退到原样传输,构建却显示成功。
+  const brExpected = produced.filter(suffix => suffix === '.br').length
+  const gzExpected = produced.length - brExpected
+  const verify = suffix => readdirDeep(dist).filter(name => name.endsWith(suffix)).length
+  const brActual = verify('.br')
+  const gzActual = verify('.gz')
+  if (brActual !== brExpected || gzActual !== gzExpected) {
+    console.error(
+      `[precompress] 落地校验失败:期望 ${brExpected} 个 .br / ${gzExpected} 个 .gz,` +
+        `实际 ${brActual} 个 .br / ${gzActual} 个 .gz`,
+    )
+    process.exit(1)
+  }
+
+  const kb = n => (n / 1024).toFixed(0)
   console.log(
     `[precompress] ${count} 个文本产物: ${kb(rawTotal)} KB → brotli ${kb(brTotal)} KB (−${pct(
       rawTotal,
@@ -99,6 +123,10 @@ function statOrNull(p) {
   } catch {
     return null
   }
+}
+
+function readdirDeep(dir) {
+  return walk(dir).map(file => path.basename(file))
 }
 
 function pct(a, b) {

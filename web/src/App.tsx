@@ -4,6 +4,7 @@ import { setLocale, t } from './i18n'
 import { relativeTime } from './relativeTime'
 import { subscribeServerEvents, subscribeServerStatus } from './serverEvents'
 import SessionsPage from './pages/SessionsPage'
+import { DeniaWordmark } from './components/DeniaWordmark'
 import { loadComposer } from './composerMemory'
 import { readCollapsedChildren, writeCollapsedChildren, restoredSidebarSession } from './sidebarMemory'
 import { extensionTabFromHash, type ExtensionTab } from './extensionsRoute'
@@ -806,7 +807,7 @@ export default function App() {
                 窗口条)都能拖窗口。子元素里的收起按钮是 clickable element,
                 drag.js 会自动让它们阻断拖拽,不会与收起操作冲突。 */}
             <div className="sidebar-logo" data-tauri-drag-region="deep">
-              <span className="brand-text">Denia</span>
+              <DeniaWordmark />
               <button
                 type="button"
                 className="icon-btn sidebar-toggle"

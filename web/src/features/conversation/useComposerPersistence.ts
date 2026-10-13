@@ -2,7 +2,7 @@ import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { loadComposer, readComposerText, saveComposer, type ComposerSnapshot } from '../../composerMemory'
 
 interface Options {
-  scope: string
+  scope: string | null
   snapshot: ComposerSnapshot
   restore: (snapshot: ComposerSnapshot) => void
   onError: (message: string) => void
@@ -62,6 +62,12 @@ export function useComposerPersistence({ scope, snapshot, restore, onError }: Op
   }, [reportError])
 
   useLayoutEffect(() => {
+    if (scope === null) {
+      sessionRef.current = null
+      setReadySession(null)
+      callbacks.current.restore(emptySnapshot())
+      return
+    }
     const session: Session = {
       scope,
       snapshot,
@@ -146,7 +152,7 @@ export function useComposerPersistence({ scope, snapshot, restore, onError }: Op
   }, [persist])
 
   return {
-    ready: readySession !== null && readySession === sessionRef.current && readySession.scope === scope,
+    ready: scope === null || (readySession !== null && readySession === sessionRef.current && readySession.scope === scope),
     flush,
   }
 }

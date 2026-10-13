@@ -7,7 +7,7 @@
 //!
 //! 控制台主包是 MB 级的 JS/CSS,经公网隧道发到手机上时**字节数就是延迟**
 //! (首屏要在弱网上多跑几百 KB)。构建期已把每个文本产物压成 `.br`/`.gz`
-//! 旁挂文件(`scripts/precompress.mjs`),这里按 `Accept-Encoding` 直接选
+//! 旁挂文件(`web/scripts/precompress.mjs`),这里按 `Accept-Encoding` 直接选
 //! 对应实体:压缩比用最高档(brotli q11,构建期跑一次无所谓耗时),运行时
 //! 零 CPU、零缓冲。没有预压缩产物的文件(以及 `--web` 指向的未构建目录)
 //! 原样发出,由响应压缩中间件兜底。

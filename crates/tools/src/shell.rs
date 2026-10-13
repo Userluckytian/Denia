@@ -490,7 +490,6 @@ impl CommandRun {
             // 命令间接改动的文件推测不出来(命令本身就是任意程序),留空。
             files: Vec::new(),
             evidence_complete: self.artifact.as_ref().map(|item| item.complete),
-            file_evidence: None,
         }
     }
 

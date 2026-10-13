@@ -120,7 +120,8 @@ struct Candidate {
 /// 按前缀而非全等判断:带产物引用的占位符在 `CLEARED_PLACEHOLDER` 之后
 /// 还跟一段回读提示,全等会把它误判为未清理、反复重清。
 fn already_cleared(content: &str) -> bool {
-    content.trim_start().starts_with(CLEARED_PLACEHOLDER)
+    let content = content.trim_start();
+    content.starts_with(CLEARED_PLACEHOLDER) || content.starts_with("[工作集归档]")
 }
 
 /// 粗略 token 估算:与 token-meter 的口径对齐(4 字符 ≈ 1 token)。

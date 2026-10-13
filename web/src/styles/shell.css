@@ -286,21 +286,12 @@
   }
 }
 
-.brand-text {
-  font-family: var(--font-mono);
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+.denia-wordmark {
+  display: block;
+  width: 110px;
+  height: 28px;
+  flex: none;
   color: var(--label-primary);
-}
-
-.brand-text em {
-  font-style: normal;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--label-tertiary);
-  letter-spacing: 0;
 }
 
 .sidebar-primary {

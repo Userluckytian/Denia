@@ -44,11 +44,13 @@ let holdWrites = false
 const backups = new Map()
 globalThis.memory = {
   load: scope => {
+    assert.ok(scope, 'loading requires an active workspace or session')
     if (fail) return Promise.reject(new Error('IndexedDB unavailable'))
     if (delayed) return new Promise(resolve => pendingLoads.push({ scope, resolve }))
     return Promise.resolve(stored.get(scope) ?? empty())
   },
   save: (scope, snapshot) => {
+    assert.ok(scope, 'saving requires an active workspace or session')
     saves.push({ scope, snapshot })
     backups.set(scope, snapshot.text)
     stored.set(scope, snapshot)
@@ -56,7 +58,10 @@ globalThis.memory = {
     if (holdWrites) return new Promise(resolve => pendingWrites.push(resolve))
     return Promise.resolve()
   },
-  read: scope => backups.get(scope) ?? null,
+  read: scope => {
+    assert.ok(scope, 'reading a backup requires an active workspace or session')
+    return backups.get(scope) ?? null
+  },
 }
 let state
 let edit
@@ -72,6 +77,12 @@ function Probe({ scope }) {
 let root = createRoot(document.getElementById('root'))
 const render = scope => act(async () => root.render(React.createElement(React.StrictMode, null,
   React.createElement(Probe, { scope }))))
+await render(null)
+assert.equal(state.ready, true)
+await act(async () => state.flush())
+window.dispatchEvent(new window.Event('pagehide'))
+assert.equal(saves.length, 0, 'startup without a workspace must not persist an invalid scope')
+assert.equal(errors.length, 0, 'startup without a workspace is not a storage failure')
 await render('session:a')
 assert.equal(state.ready, true)
 assert.equal(current.text, 'saved a')
@@ -89,6 +100,16 @@ assert.deepEqual(saves.at(-1).snapshot, rich('edited b'))
 root = createRoot(document.getElementById('root'))
 await render('session:b')
 assert.equal(current.text, 'edited b')
+assert.equal(current.queue.length, 1)
+await render(null)
+assert.deepEqual(current, empty(), 'deselecting the workspace must clear the previous composer')
+const savesWithoutScope = saves.length
+await act(async () => state.flush())
+window.dispatchEvent(new window.Event('pagehide'))
+assert.equal(saves.length, savesWithoutScope)
+assert.equal(errors.length, 0)
+await render('session:b')
+assert.equal(current.text, 'edited b', 'returning to a session must restore its retained draft')
 assert.equal(current.queue.length, 1)
 await act(async () => root.unmount())
 

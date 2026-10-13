@@ -447,7 +447,7 @@ export default function SessionsPage({
   const [attachments, setAttachments] = useState<{ name: string; mime: string; file: File }[]>([])
   // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
-  const composerScope = activeId ? `session:${activeId}` : `workspace:${activeWs?.path ?? ''}`
+  const composerScope = activeId ? `session:${activeId}` : activeWs?.path ? `workspace:${activeWs.path}` : null
   const composerSnapshot = useMemo<ComposerSnapshot>(() => ({
     text: prompt, images: pastedImages, attachments, quotes: trajQuotes, queue: queuedMessages,
   }), [prompt, pastedImages, attachments, trajQuotes, queuedMessages])
@@ -1544,10 +1544,10 @@ export default function SessionsPage({
             flushSync(() => clearComposerState())
             await flushComposer()
           }
-          await saveComposer(composerScope, empty)
+          if (composerScope) await saveComposer(composerScope, empty)
           if (mountedRef.current) setActiveId(createdId, activeWs?.id)
         } catch (error) { notify('err', String(error)) }
-      } else if (ok && options?.clearInput !== false && !mountedRef.current) {
+      } else if (ok && options?.clearInput !== false && !mountedRef.current && composerScope) {
         await saveComposer(composerScope, { ...composerSnapshotRef.current, text: '', images: [], attachments: [], quotes: [] })
       }
       sendingRef.current = false
@@ -1602,7 +1602,7 @@ export default function SessionsPage({
           .then((ok) => {
             if (ok) {
               setQueuedMessages((previous) => previous.filter((item) => item.id !== next.id))
-              void saveComposer(composerScope, { ...composerSnapshotRef.current,
+              if (composerScope) void saveComposer(composerScope, { ...composerSnapshotRef.current,
                 queue: composerSnapshotRef.current.queue.filter((item) => item.id !== next.id),
               }).catch((error) => notify('err', String(error)))
             }
@@ -1653,7 +1653,7 @@ export default function SessionsPage({
       })
       if (ok) {
         setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
-        await saveComposer(composerScope, { ...composerSnapshotRef.current,
+        if (composerScope) await saveComposer(composerScope, { ...composerSnapshotRef.current,
           queue: composerSnapshotRef.current.queue.filter((item) => item.id !== message.id),
         })
       }

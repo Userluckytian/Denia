@@ -1148,7 +1148,7 @@ mod tests {
     #[tokio::test]
     async fn driver_reads_live_console_settings_without_waiting_for_a_forwarder() {
         let home = temp_root();
-        let state = build_state(&home, false, 3600).await.unwrap();
+        let state = build_state(&home, false, 43654).await.unwrap();
         let running_snapshot = state.driver.driver_settings();
         state
             .settings
