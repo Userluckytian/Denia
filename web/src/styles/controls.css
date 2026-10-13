@@ -690,7 +690,7 @@ button.btn.form-action {
   width: 100%;
   border: 1px solid var(--border-l1);
   border-radius: var(--r-md);
-  background: var(--bg-layer-1);
+  background: var(--composer-panel-surface);
 }
 
 .queue-head {
@@ -885,7 +885,7 @@ button.btn.form-action {
   width: 100%;
   border: 1px solid var(--border-l1);
   border-radius: var(--r-md);
-  background: var(--bg-layer-1);
+  background: var(--composer-panel-surface);
 }
 
 .todo-header {
@@ -1179,7 +1179,7 @@ button.btn.form-action {
   padding: 14px 16px;
   border: 1px solid var(--border-l2);
   border-radius: 12px;
-  background: var(--bg-layer-1);
+  background: var(--composer-panel-surface);
   box-shadow: var(--shadow-lv2);
 }
 

@@ -681,7 +681,7 @@
   width: 100%;
   border: 1px solid var(--border-l2);
   border-radius: var(--r-lg);
-  background: var(--bg-layer-1);
+  background: var(--composer-panel-surface);
   box-shadow: var(--shadow-lv2);
   overflow: hidden;
 }
@@ -899,7 +899,7 @@
   padding: 10px 8px 10px calc(var(--dock-inset, 10px) - 1px);
   border: 1px solid var(--border-l1);
   border-radius: var(--r-md);
-  background: var(--bg-layer-1);
+  background: var(--composer-panel-surface);
   transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
 }
 

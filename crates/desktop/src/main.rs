@@ -192,7 +192,11 @@ fn main() {
 /// 先建窗口再等服务的顺序很重要:启动的几百毫秒里用户应当看到东西,
 /// 而不是"双击了没反应";失败时也才有窗口可以承载错误信息。
 fn open_window(handle: &tauri::AppHandle, size: (f64, f64)) -> tauri::Result<()> {
-    WebviewWindowBuilder::new(handle, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
+    let builder = WebviewWindowBuilder::new(handle, MAIN_WINDOW, WebviewUrl::App("index.html".into()));
+    // Windows 默认只解码 ICO 首帧(16px)，任务栏缩放需使用高分辨率源图。
+    #[cfg(windows)]
+    let builder = builder.icon(tauri::include_image!("icons/128x128@2x.png"))?;
+    builder
         .title(WINDOW_TITLE)
         // 使用前端自绘标题栏，避免原生装饰与应用视觉体系割裂。
         .decorations(false)

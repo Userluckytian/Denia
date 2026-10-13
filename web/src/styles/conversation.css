@@ -27,7 +27,7 @@
   gap: 10px;
   padding: 12px 20px 10px;
   border-bottom: 1px solid var(--border-l1);
-  background: color-mix(in srgb, var(--bg-layer-1) 85%, transparent);
+  background: var(--bg-base);
   /* 盖住对话轴顶部,轴从 header 下沿起。 */
   position: relative;
   z-index: 2;
@@ -1293,7 +1293,7 @@
   max-width: 100%;
   border: 1px solid var(--border-l1);
   border-radius: var(--r-sm);
-  background: var(--bg-layer-1);
+  background: var(--turn-diff-surface);
   overflow: hidden;
 }
 

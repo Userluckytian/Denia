@@ -803,9 +803,7 @@ export default function App() {
           <div
             className={`sidebar-wide${wideFadeOut ? ' fade-out' : ''}${wideEnter ? ' wide-in' : ''}`}
           >
-            {/* 品牌行兼作窗口顶带的左段:整条顶带(左段品牌行 + 右段主列
-                窗口条)都能拖窗口。子元素里的收起按钮是 clickable element,
-                drag.js 会自动让它们阻断拖拽,不会与收起操作冲突。 */}
+            {/* 品牌区保留窗口拖动能力；折叠按钮由 drag.js 排除。 */}
             <div className="sidebar-logo" data-tauri-drag-region="deep">
               <DeniaWordmark />
               <button

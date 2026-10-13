@@ -5,11 +5,16 @@
 
 :root {
   --bg-base: #090909;
-  --sidebar-fill: #0f0f0f;
+  --sidebar-fill: #101112;
+  --sidebar-button: #1b1c1d;
+  --sidebar-button-edge: #ffffff19;
   --bg-layer-1: #111111;
   --bg-layer-2: #161616;
   --bg-layer-3: #1c1c1c;
   --input-major: #121212;
+  --composer-surface: var(--input-major);
+  --turn-diff-surface: var(--bg-layer-1);
+  --composer-panel-surface: var(--bg-layer-1);
   --code-block: #0d0d0d;
   --selector: #1a1a1a;
   --bubble-fill: #1a1a1a;
@@ -75,12 +80,17 @@
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) {
-    --bg-base: #ffffff;
-    --sidebar-fill: #fafafa;
+    --bg-base: #fdfcf9;
+    --sidebar-fill: #f6f5f2;
+    --sidebar-button: #fdfcf9;
+    --sidebar-button-edge: #0000001a;
     --bg-layer-1: #ffffff;
     --bg-layer-2: #f5f5f5;
     --bg-layer-3: #ebebeb;
     --input-major: #ffffff;
+    --composer-surface: #fdfcf9;
+    --turn-diff-surface: #fdfcf9;
+    --composer-panel-surface: #fdfcf9;
     --code-block: #f5f5f5;
     --selector: #f0f0f0;
     --bubble-fill: #f0f0f0;
@@ -132,12 +142,17 @@
 }
 
 :root[data-theme='light'] {
-  --bg-base: #ffffff;
-  --sidebar-fill: #fafafa;
+  --bg-base: #fdfcf9;
+  --sidebar-fill: #f6f5f2;
+  --sidebar-button: #fdfcf9;
+  --sidebar-button-edge: #0000001a;
   --bg-layer-1: #ffffff;
   --bg-layer-2: #f5f5f5;
   --bg-layer-3: #ebebeb;
   --input-major: #ffffff;
+  --composer-surface: #fdfcf9;
+  --turn-diff-surface: #fdfcf9;
+  --composer-panel-surface: #fdfcf9;
   --code-block: #f5f5f5;
   --selector: #f0f0f0;
   --bubble-fill: #f0f0f0;

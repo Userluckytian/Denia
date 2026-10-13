@@ -18,8 +18,8 @@
     align-items: stretch;
     flex: none;
     height: 38px;
-    /* 与主列头部同一底色:它是主列的顶边,不是侧栏的邻居。 */
-    background: var(--sidebar-fill);
+    /* 与聊天头部及内容区共用底色。 */
+    background: var(--bg-base);
     border-bottom: 1px solid var(--border-l1);
     color: var(--label-secondary);
     user-select: none;
@@ -109,7 +109,7 @@
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  padding: 8px 10px 10px;
+  padding: 0 12px 12px;
   background: var(--sidebar-fill);
   border-right: 1px solid var(--border-l1);
   /* 列宽收拢时裁切冻结宽度的宽态内容:滑动途中不发生重排 */
@@ -122,7 +122,7 @@
   flex-direction: column;
   min-height: 0;
   flex: 1;
-  width: calc(var(--sidebar-w) - 20px);
+  width: calc(var(--sidebar-w) - 24px);
   transition: opacity 150ms var(--ease);
 }
 
@@ -140,7 +140,7 @@
   }
 }
 
-/* 收起态顶带:桌面端与展开态品牌行、主列窗口条等高同底线。 */
+/* 收起态控制区与展开态品牌区同高，保持导航位置稳定。 */
 .sidebar-rail-top {
   flex: none;
   display: flex;
@@ -243,47 +243,19 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 52px;
-  padding: 6px 6px 2px;
-  margin-bottom: 4px;
+  height: 76px;
+  padding: 0 12px;
+  margin-bottom: 0;
   color: var(--label-primary);
 }
 
-/* ---- 桌面端:侧栏顶带与主列窗口条对齐 ----
- *
- * 侧栏的品牌行(展开态)/ 展开开关行(收起态)与主列的窗口条同高(38px)、
- * 同底线,两者合起来是横跨窗口的一条顶带:左段是侧栏品牌,右段是窗口
- * 按钮 —— 品牌只此一处,不再与窗口条重复。
- *
- * 位置:必须写在 `.sidebar-logo` 基础规则**之后**。两者特异性相同,CSS
- * 靠后出现者胜;放到前面的窗口条媒体查询里会被下面的基础规则反过来覆盖
- * (实测:顶带还是 52px,底线对不上)。
- *
- * 下边框要横贯整列:侧栏有 10px 左右内边距,靠负 margin 把线拉到列边界,
- * 再用等量 padding 把内容推回去。
- *
- * 只在桌面生效:手机端侧栏是覆盖式抽屉,顶部尺寸要按触控来(≥44px)。
- */
-@media (min-width: 821px) {
-  .sidebar {
-    padding-top: 0;
-  }
+.sidebar-rail-top {
+  height: 76px;
+}
 
-  .sidebar-logo,
-  .sidebar-rail-top {
-    height: 38px;
-    margin-bottom: 16px;
-    border-bottom: 1px solid var(--border-l1);
-    margin-left: -10px;
-    margin-right: -10px;
-    padding-left: 10px;
-    padding-right: 10px;
-  }
-
-  .sidebar-logo {
-    padding-top: 0;
-    padding-bottom: 0;
-  }
+.shell[data-collapsed] .sidebar {
+  padding-left: 10px;
+  padding-right: 10px;
 }
 
 .denia-wordmark {
@@ -295,11 +267,11 @@
 }
 
 .sidebar-primary {
-  --nav-height: 40px;
+  --nav-height: 39px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 0 2px 20px;
+  gap: 7px;
+  padding: 0 4px 25px;
   flex: none;
 }
 
@@ -341,14 +313,16 @@
 .sidebar-new-btn:not(.sidebar-extensions-btn) {
   justify-content: center;
   text-align: center;
-  background: var(--bg-layer-2);
-  border: 1px solid var(--border-l2);
+  background: var(--sidebar-button);
+  border: 1px solid var(--sidebar-button-edge);
   color: var(--label-primary);
-  margin-bottom: 6px;
-  font-weight: 600;
+  gap: 11px;
+  padding: 0 12px;
+  margin-bottom: 1px;
+  font-weight: 500;
 }
 .sidebar-new-btn:not(.sidebar-extensions-btn):hover {
-  background: var(--bg-layer-3);
+  background: color-mix(in srgb, var(--sidebar-button), var(--label-primary) 4%);
   border-color: var(--border-l3);
 }
 .sidebar-new-btn:not(.sidebar-extensions-btn):active {
@@ -382,7 +356,7 @@
   justify-content: space-between;
   gap: 8px;
   min-height: 32px;
-  padding: 0 10px;
+  padding: 0 12px;
 }
 
 .sidebar-region-head .label {
@@ -653,7 +627,11 @@
 }
 
 .ws-group + .ws-group {
-  margin-top: 12px;
+  margin-top: 4px;
+}
+
+.ws-group.open + .ws-group {
+  margin-top: 14px;
 }
 
 .ws-group-head {
@@ -664,9 +642,9 @@
   border: none;
   background: none;
   color: var(--label-primary);
-  font-size: 13px;
-  font-weight: 550;
-  padding: 0 8px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 10px;
   border-radius: 9px;
   cursor: pointer;
   text-align: left;
@@ -688,8 +666,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 17px;
+  height: 20px;
   border-radius: 6px;
   color: var(--label-secondary);
   background: transparent;
