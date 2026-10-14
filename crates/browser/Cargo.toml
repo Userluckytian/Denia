@@ -10,8 +10,8 @@ denia-core = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 
-# Playwright 绑定(JSON-RPC over stdio 到官方 Node driver;driver 自带 Node)。
-playwright-rs = "0.18"
+# 纯 Rust CDP 客户端:直接驱动本机 Chrome/Edge(无 Node、无 Playwright driver)。
+chromiumoxide = "0.9.1"
 
 serde = { workspace = true }
 serde_json = { workspace = true }

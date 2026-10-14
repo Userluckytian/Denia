@@ -1,6 +1,6 @@
 //! 浏览器侧观测缓冲:网络抓包(环形,按 tab 分桶)。
 //!
-//! 这些缓冲只服务 `networkList` 命令,与浏览器驱动解耦——Playwright 的
+//! 这些缓冲只服务 `networkList` 命令,与浏览器驱动解耦——CDP 的
 //! 事件回调把数据投进来,读取侧按 tab 查询。
 
 use std::collections::HashMap;
@@ -23,7 +23,14 @@ pub struct NetworkLog {
 
 impl NetworkLog {
     /// 记录/合并一条请求(同一 requestId 的多次事件按字段合并)。
-    pub fn record(&mut self, tab_id: &str, request_id: &str, entry: Value) {
+    pub fn record(&mut self, tab_id: &str, request_id: &str, mut entry: Value) {
+        // 条目带上 requestId(列表展示与 networkGetBody 取用;与旧实现一致)。
+        if let Some(map) = entry.as_object_mut() {
+            map.insert(
+                "requestId".to_string(),
+                Value::String(request_id.to_string()),
+            );
+        }
         let order = self.order.entry(tab_id.to_string()).or_default();
         let is_new = !order.iter().any(|(id, _)| id == request_id);
         if is_new {

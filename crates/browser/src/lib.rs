@@ -1,21 +1,24 @@
-//! 内嵌浏览器:通过 **Playwright** 驱动真实浏览器(Chromium/Firefox/WebKit)。
+//! 内嵌浏览器:通过 **chromiumoxide**(纯 Rust CDP 客户端)驱动本机
+//! Chrome/Edge。
 //!
 //! # 架构
 //!
 //! ```text
-//! denia ──▶ playwright-rs (JSON-RPC over stdio)
-//!              └─▶ Playwright Node driver(自带捆绑 Node,不依赖用户环境)
-//!                     └─▶ Chromium(持久化 profile,登录态跨重启存活)
+//! denia ──▶ chromiumoxide(CDP over WebSocket)
+//!              └─▶ 系统 Chrome/Edge(零下载、零打包,发布版自包含)
 //! ```
 //!
-//! 与旧实现(自建 headless Chrome + 自写 CDP 客户端)的区别:
-//! - **进程管理、CDP 协议、断线重连、元素可操作性等待全部由 Playwright 负责**,
-//!   denia 不再自己维护 CDP 连接与 Chrome 生命周期;
-//! - **元素引用走 Playwright 官方 aria snapshot**:AI 模式产出 `[ref=eN]`,
-//!   定位用 `aria-ref=eN` 引擎,不再往页面注入全局变量;
-//! - **无窗口后台运行**:headless 启动,不弹浏览器窗口(对齐旧实现);
+//! 与旧实现(playwright-rs + 官方 Node driver)的区别:
+//! - **不再依赖 Node/Playwright driver**:旧实现把 driver 目录的构建机
+//!   绝对路径编译期钉进 exe,CI 构建的发布版在用户机器上找不到该路径;
+//!   现在直接用系统浏览器,发布包自包含;
+//! - **元素引用自维护**:`snapshot` 基于无障碍树产出 `[ref=eN]`,交互命令
+//!   按 ref 查 backendNodeId,再用 CDP 原语(DOM/Input)定位与操作,
+//!   不往页面注入全局变量(见 elements.rs);
+//! - **无窗口后台运行**:headless 启动,不弹浏览器窗口;
 //!   画面通过控制台侧边栏的 screencast 实时展示。
 
+mod elements;
 pub mod driver;
 pub mod manager;
 pub mod network;

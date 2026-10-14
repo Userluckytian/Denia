@@ -1,10 +1,11 @@
-//! `browser` 工具:给模型的浏览器控制面(基于 **Playwright**)。
+//! `browser` 工具:给模型的浏览器控制面(基于 **CDP**,驱动本机 Chrome/Edge)。
 //!
 //! 工具本体只做参数解析 + 转发到 [`BrowserHub`];截图以视觉输入回注会话
 //! (与 `read_file` 图片注入同一条路)。
 //!
-//! 底层是微软 Playwright 驱动的**真实浏览器**(headless 无窗口后台运行,
-//! 画面走控制台侧边栏),元素引用走官方 aria snapshot 的 `[ref=eN]` + `aria-ref` 引擎。
+//! 底层通过 chromiumoxide(纯 Rust CDP 客户端)驱动**本机 Chrome/Edge**
+//! (headless 无窗口后台运行,画面走控制台侧边栏),元素引用来自无障碍树
+//! 快照产出的 `[ref=eN]`。
 
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient};
 
-const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(Playwright 驱动 Chromium;无窗口后台运行,用户可在控制台浏览器侧栏实时看到画面)。命令面:
+const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(CDP 驱动本机 Chrome/Edge;无窗口后台运行,用户可在控制台浏览器侧栏实时看到画面)。命令面:
 - 导航:navigate{url}(仅 http/https)、back{}、forward{}、reload{}
 - 读取:getState{}(浏览器没跑时会按需启动)、snapshot{maxElements?, includeHidden?}(返回可访问性树,每个可交互元素带 `[ref=eN]` 引用;后续交互用该引用)、screenshot{fullPage?, clip?}(返回截图,图片自动注入会话)、elementInfo{x,y}
 - 交互:click{ref?|locator?|x,y, button?, doubleClick?}、fill{ref, value}(整体替换输入框内容)、type{ref?, text}(追加输入)、press{key, ref?}、scroll{ref?|x,y, deltaX?, deltaY?}(滚动,缺省向下 360px)、hover{ref?|x,y}、select{ref, values[]}、check{ref, checked?}、drag{fromRef,toRef}
@@ -28,9 +29,9 @@ const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(Playwright 驱动 Chromi
 - 网络抓包:networkList{urlFilter?, max?}(该 tab 捕获的请求:URL/方法/资源类型/请求体,环形缓冲约 200 条)、networkGetBody{requestId, bodyKind?}(bodyKind 缺省 "response" 取响应体;传 "request" 取 POST 请求体)
 - 可视化模式:任意命令可带 visualMode: true,展开控制台浏览器侧栏让用户实时看到画面;默认不开
 
-元素引用约定:snapshot 产出的 `[ref=eN]` 直接传 `e6`(也接受 `@e6`);ref 只在最近一次 snapshot 之后有效,页面导航/重渲染后需重新 snapshot。也可以直接传 CSS 选择器或 Playwright 定位器(`#id`、`[aria-label=...]`、`text=登录`、`getByRole('button')`)。
+元素引用约定:snapshot 产出的 `[ref=eN]` 直接传 `e6`(也接受 `@e6`);ref 只在最近一次 snapshot 之后有效,页面导航后需重新 snapshot。也可以直接传 CSS 选择器或文本定位(`#id`、`[aria-label=...]`、`text=登录`)。
 启动语义:交互命令会按需拉起浏览器;list/close 等查询与善后命令在浏览器没跑时原地返回。
-稳定性:元素可操作性等待(可见/可命中/稳定)由 Playwright 负责,过期引用会明确报错而不是静默点错。
+稳定性:点击带轻量可操作性重试(滚动到视图 + 可见性检查),过期引用会明确报错而不是静默点错。
 典型流程:snapshot 拿 ref → 用 ref 交互 → 需要视觉时 screenshot。分析页面接口先 networkList。"#;
 
 #[derive(Deserialize)]

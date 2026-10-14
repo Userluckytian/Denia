@@ -228,7 +228,7 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
 /// 段与 browser schema 严格同步:仅在带 hub 的 builder 里注册(hub 为 Some
 /// 才有工具),无 browser 的部署模型不会看到不存在的工具。
 ///
-/// 机制上由 Playwright 驱动**真实浏览器**(headless 无窗口后台运行,画面
+/// 机制上通过 CDP 驱动**本机 Chrome/Edge**(headless 无窗口后台运行,画面
 /// 走控制台侧边栏),本段负责让模型明白:引用何时失效、收尾该关哪些 tab、
 /// 什么时候才该开可视化模式。
 fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
@@ -236,7 +236,7 @@ fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
         name: "tool:browser".to_string(),
         order: SectionOrder::ToolBrowser.value(),
         text: PromptText::Static(
-            "browser 由 Playwright 驱动真实浏览器,无窗口后台运行(headless),画面只在控制台浏览器侧栏实时展示。启动按需:交互命令会拉起浏览器;list/close 等查询与善后命令在浏览器没跑时原地返回,绝不凭空拉起实例。\n\
+            "browser 由 CDP 驱动本机 Chrome/Edge,无窗口后台运行(headless),画面只在控制台浏览器侧栏实时展示。启动按需:交互命令会拉起浏览器;list/close 等查询与善后命令在浏览器没跑时原地返回,绝不凭空拉起实例。\n\
              元素引用:snapshot 产出的 `[ref=eN]` 直接传 `e6`(也接受 `@e6`)。引用只在最近一次 snapshot 之后有效,且仅对同一 tab;页面导航、提交、SPA 路由切换后必须重新 snapshot——拿旧引用操作会报错(这是刻意的,避免静默点错元素)。\n\
              收尾义务:任务完成、或确认后续不再使用浏览器时,把本次打开的 tab 逐个 close;判定口径 = list 里本次打开的 tab 全部消失,用户原有的 tab 原样保留。**绝不关闭不是自己开的 tab,绝不退出浏览器**。\n\
              可视化模式:仅当用户明确要求看着他操作(如\"打开给我看\"\"可视化模式\"),或用户的话里明显需要亲眼看到画面(如\"看下这个页面长什么样\"\"演示一下操作\")时,才给命令加 visualMode: true 展开浏览器侧栏;常规抓取、点击、检查接口等后台任务保持默认。开启后用户手动收起侧栏即为不要看,不要再重复请求展开。"
@@ -1442,10 +1442,10 @@ mod browser_prompt_tests {
             .find(|section| section.name == "tool:browser")
             .expect("tool:browser section registered");
         assert_eq!(section.audience, SectionAudience::Model);
-        // 新架构(Playwright):纪律段讲清引用有效期、收尾口径与可视化模式。
+        // 新架构(CDP):纪律段讲清引用有效期、收尾口径与可视化模式。
         assert!(
-            section.text.contains("Playwright"),
-            "纪律段应说明底层是 Playwright"
+            section.text.contains("Chrome/Edge"),
+            "纪律段应说明底层浏览器"
         );
         assert!(
             section.text.contains("引用只在最近一次 snapshot 之后有效"),

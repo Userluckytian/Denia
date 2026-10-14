@@ -1,11 +1,12 @@
-//! 浏览器中枢:Playwright 驱动的会话、tab 注册表、命令执行与事件广播。
+//! 浏览器中枢:CDP 会话、tab 注册表、命令执行与事件广播。
 //!
-//! 与旧实现(自建 headless Chrome + 自写 CDP 客户端)的区别:
-//! - **进程与协议由 Playwright 负责**:driver 自带 Node,浏览器由其拉起与守护;
-//! - **元素引用用 Playwright 官方 aria snapshot**:AI 模式产出 `[ref=eN]`,
-//!   定位走 `aria-ref=eN` 引擎,不再往页面全局注入自定义 ref 映射;
-//! - **tab 身份用自维护 id**:Playwright 的 Page 不暴露 guid,这里分配稳定
-//!   tabId(`t1`、`t2`…),映射到 `Page` 句柄。
+//! 与旧实现(Playwright driver)的区别:
+//! - 命令全部走 chromiumoxide 的 CDP 原语(借 [`crate::elements`] 的定位与
+//!   动作封装),不再有 Node driver / 编译期路径依赖;
+//! - tab 身份自维护(`t1`、`t2`…),映射到 chromiumoxide 的 `Page`;
+//! - `[ref=eN]` 引用表按 tab 存放(最近一次 snapshot 分配),页面导航后作废;
+//! - 浏览器进程退出由双看护发现:驱动层的连接断开信号 + `Browser::try_wait`
+//!   轮询(进程被杀时连接流可能不结束,必须兜底)。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,26 +14,34 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use playwright_rs::protocol::{
-    AriaSnapshotMode, AriaSnapshotOptions, Dialog, MouseButton, MouseOptions, Page, ResponseObject,
-    ScreencastStartOptions, ScreenshotClip, ScreenshotOptions, SelectOption, Viewport,
-    WaitForOptions,
+use chromiumoxide::cdp::browser_protocol::emulation::{
+    SetDeviceMetricsOverrideParams,
 };
+use chromiumoxide::cdp::browser_protocol::input::MouseButton;
+use chromiumoxide::cdp::browser_protocol::network::{
+    EnableParams as NetworkEnableParams, EventLoadingFailed, EventRequestWillBeSent,
+    EventResponseReceived, GetRequestPostDataParams, GetResponseBodyParams,
+};
+use chromiumoxide::cdp::browser_protocol::page::{
+    CaptureScreenshotFormat, CaptureScreenshotParams, EventFrameNavigated,
+    EventJavascriptDialogOpening, EventScreencastFrame, GetLayoutMetricsParams,
+    GetNavigationHistoryParams, HandleJavaScriptDialogParams, NavigateParams,
+    NavigateToHistoryEntryParams, ReloadParams, ScreencastFrameAckParams, StartScreencastFormat,
+    StartScreencastParams, StopScreencastParams, Viewport as ClipViewport,
+};
+use chromiumoxide::cdp::browser_protocol::target::{ActivateTargetParams, EventTargetDestroyed};
+use chromiumoxide::page::Page;
+use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::driver::{self, LaunchSpec, Session};
+use crate::elements;
 use crate::network::NetworkLog;
 use crate::{BrowserCommand, CommandOutcome};
 
 /// tab 上限:防止模型无限开页把浏览器撑爆。
 const TAB_LIMIT: usize = 32;
-
-/// 挂起的 JS dialog:给模型/面板看的信息 + 处置句柄。
-struct PendingDialog {
-    info: Value,
-    handle: Dialog,
-}
 
 /// 单个 tab 的运行时状态。
 #[derive(Debug, Clone)]
@@ -90,7 +99,7 @@ pub struct FrameViewport {
     pub height: u32,
 }
 
-/// 活跃会话:driver + 上下文 + tab 注册表。
+/// 活跃会话:浏览器句柄 + 上下文 + tab 注册表。
 struct Inner {
     session: Session,
     /// tabId -> Page 句柄。
@@ -102,6 +111,8 @@ struct Inner {
     next_tab_seq: u64,
     /// 当前 screencast 归属的 tab(单实例单画面;切 tab 时迁移)。
     screencast_tab: Option<String>,
+    /// tabId -> 当前视口(viewportSet 后记录;reset 恢复 spec 默认)。
+    viewports: HashMap<String, (u32, u32)>,
 }
 
 impl Inner {
@@ -163,6 +174,7 @@ impl Inner {
     fn unregister(&mut self, tab_id: &str) {
         self.pages.remove(tab_id);
         self.tabs.remove(tab_id);
+        self.viewports.remove(tab_id);
         if self.active_tab.as_deref() == Some(tab_id) {
             self.active_tab = self.tabs.keys().next().cloned();
         }
@@ -173,8 +185,8 @@ impl Inner {
         let Some(page) = self.pages.get(tab_id).cloned() else {
             return;
         };
-        let url = page.url();
-        let title = page.title().await.unwrap_or_default();
+        let url = elements::page_url(&page).await;
+        let title = elements::page_title(&page).await;
         if let Some(info) = self.tabs.get_mut(tab_id) {
             info.url = url;
             info.title = title;
@@ -201,7 +213,7 @@ impl Inner {
 
 /// 浏览器中枢:server 持有,工具与 REST API 共用。
 pub struct BrowserManager {
-    /// 活跃会话(Arc 包一层:事件闭包需独立持有)。
+    /// 活跃会话(Arc 包一层:看护任务需独立持有)。
     inner: Arc<Mutex<Option<Inner>>>,
     /// 启动互斥:并发命令同时发现未启动时,只放一个进去拉起。
     starting: Mutex<()>,
@@ -209,17 +221,14 @@ pub struct BrowserManager {
     command_gate: Mutex<()>,
     generation: AtomicU64,
     event_broadcast: broadcast::Sender<BrowserEvent>,
-    /// 挂起 JS dialog(tabId -> {info, handle}):handle 用于 accept/dismiss。
-    pending_dialogs: Arc<std::sync::Mutex<HashMap<String, PendingDialog>>>,
+    /// 挂起 JS dialog(tabId -> 信息):handleDialog 消费。
+    pending_dialogs: Arc<std::sync::Mutex<HashMap<String, Value>>>,
     /// 网络抓包缓冲。
     network_log: Arc<std::sync::Mutex<NetworkLog>>,
-    /// 响应体句柄(合成 requestId -> (ResponseObject, content-type)):
-    /// networkGetBody 取响应体用。
-    bodies: Arc<Mutex<HashMap<String, (ResponseObject, String)>>>,
-    /// (tabId, url) -> 最近一次请求的合成 id:on_response 与 on_request 对齐用。
-    inflight: Arc<std::sync::Mutex<HashMap<(String, String), String>>>,
-    /// 合成 requestId 计数器。
-    request_seq: Arc<AtomicU64>,
+    /// 每 tab 的 `[ref=eN]` → backendNodeId(最近一次 snapshot 分配)。
+    ref_tables: Arc<std::sync::Mutex<HashMap<String, HashMap<String, i64>>>>,
+    /// tabId -> 浏览器 target id(用于 Target.targetDestroyed 反查)。
+    target_ids: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// 启动参数。
     spec: LaunchSpec,
     /// 用户数据目录(profile 落盘位置)。
@@ -295,9 +304,8 @@ impl BrowserManager {
             event_broadcast,
             pending_dialogs: Arc::new(std::sync::Mutex::new(HashMap::new())),
             network_log: Arc::new(std::sync::Mutex::new(NetworkLog::default())),
-            bodies: Arc::new(Mutex::new(HashMap::new())),
-            inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            request_seq: Arc::new(AtomicU64::new(0)),
+            ref_tables: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            target_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
             spec,
             home,
             tab_owners: TabOwners::default(),
@@ -383,16 +391,15 @@ impl BrowserManager {
     /// 查看某 tab 的挂起 dialog(不取走;handleDialog 才消费)。
     pub fn peek_dialog(&self, tab_id: &str) -> Option<Value> {
         let guard = self.pending_dialogs.lock().ok()?;
-        guard.get(tab_id).map(|pending| pending.info.clone())
+        guard.get(tab_id).cloned()
     }
 
-    /// 取走并清空某 tab 的挂起 dialog(信息 + 处置句柄)。
-    pub fn take_dialog_handle(&self, tab_id: &str) -> Option<(Value, Dialog)> {
+    /// 取走某 tab 的挂起 dialog 信息。
+    pub fn take_dialog(&self, tab_id: &str) -> Option<Value> {
         self.pending_dialogs
             .lock()
             .ok()
             .and_then(|mut map| map.remove(tab_id))
-            .map(|pending| (pending.info, pending.handle))
     }
 
     /// 清掉某 tab 的挂起 dialog。
@@ -435,6 +442,27 @@ impl BrowserManager {
         self.broadcast(BrowserEvent::VisualModeRequested);
     }
 
+    /// 取某 tab 最近的 ref 表(快照分配)。
+    fn ref_table(&self, tab_id: &str) -> HashMap<String, i64> {
+        self.ref_tables
+            .lock()
+            .map(|tables| tables.get(tab_id).cloned().unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// 清除某 tab 的引用/目标/弹窗记录(关闭或导航时)。
+    fn forget_tab(&self, tab_id: &str) {
+        if let Ok(mut tables) = self.ref_tables.lock() {
+            tables.remove(tab_id);
+        }
+        if let Ok(mut ids) = self.target_ids.lock() {
+            ids.remove(tab_id);
+        }
+        if let Ok(mut dialogs) = self.pending_dialogs.lock() {
+            dialogs.remove(tab_id);
+        }
+    }
+
     /// 状态快照(前端轮询用)。
     pub async fn snapshot_state(&self) -> Value {
         let guard = self.inner.lock().await;
@@ -448,7 +476,7 @@ impl BrowserManager {
                     .lock()
                     .map(|map| map
                         .iter()
-                        .map(|(k, v)| json!({ "tabId": k, "dialog": v.info }))
+                        .map(|(k, v)| json!({ "tabId": k, "dialog": v }))
                         .collect::<Vec<_>>())
                     .unwrap_or_default(),
             }),
@@ -476,7 +504,8 @@ impl BrowserManager {
             return Ok(());
         }
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let session = driver::launch(&self.spec, generation).await?;
+        let (session, exit) = driver::launch(&self.spec, generation).await?;
+
         let mut inner = Inner {
             session,
             pages: HashMap::new(),
@@ -484,14 +513,22 @@ impl BrowserManager {
             active_tab: None,
             next_tab_seq: 0,
             screencast_tab: None,
+            viewports: HashMap::new(),
         };
+
         // 持久化 profile 会恢复上次的标签页;把它们纳入注册表。
-        for page in inner.session.context.pages() {
-            let url = page.url();
+        let existing = inner
+            .session
+            .browser
+            .pages()
+            .await
+            .map_err(|error| format!("枚举已有标签页失败: {error}"))?;
+        for page in existing {
+            let url = elements::page_url(&page).await;
             if url.is_empty() || url == "about:blank" {
                 continue;
             }
-            let title = page.title().await.unwrap_or_default();
+            let title = elements::page_title(&page).await;
             let tab_id = inner.register(page, url, title);
             if inner.active_tab.is_none() {
                 inner.active_tab = Some(tab_id);
@@ -501,263 +538,250 @@ impl BrowserManager {
         if inner.pages.is_empty() {
             let page = inner
                 .session
-                .context
-                .new_page()
+                .browser
+                .new_page("about:blank")
                 .await
                 .map_err(|error| format!("创建初始标签页失败: {error}"))?;
             let tab_id = inner.register(page, "about:blank".to_string(), String::new());
             inner.active_tab = Some(tab_id);
         }
-        // 给每个 Page 挂监听(导航/控制台/dialog/网络/关闭)。
+
+        // 浏览器级事件:target 销毁(页面被关闭)时清注册表。
+        match inner
+            .session
+            .browser
+            .event_listener::<EventTargetDestroyed>()
+            .await
+        {
+            Ok(events) => self.spawn_target_destroyed_watcher(events),
+            Err(error) => tracing::warn!("注册 targetDestroyed 监听失败: {error}"),
+        }
+
+        // 给每个 Page 挂监听(先于任何后续导航,避免错过早期事件)。
         let tab_ids: Vec<String> = inner.tabs.keys().cloned().collect();
         for tab_id in tab_ids {
             if let Some(page) = inner.pages.get(&tab_id).cloned() {
-                self.wire_page(tab_id, page);
+                self.wire_page(tab_id, page).await;
             }
         }
-        // 浏览器被用户关掉/崩溃:清空会话,下次命令自动重新拉起。
-        // 不注册这个的话,`inner` 会一直指向死会话,所有命令都报
-        // TargetClosed 且永远不自愈。
-        let context = inner.session.context.clone();
-        let session_generation = inner.session.generation;
+
+        *self.inner.lock().await = Some(inner);
+
+        // 退出看护 1:驱动层退出信号(连接断开/主动关闭)。
         let inner_slot = self.inner.clone();
         let broadcast = self.event_broadcast.clone();
         tokio::spawn(async move {
-            let _ = context
-                .on_close(move || {
-                    let inner_slot = inner_slot.clone();
-                    let broadcast = broadcast.clone();
-                    async move {
-                        let mut slot = inner_slot.lock().await;
-                        // 只清理本代会话(避免把刚拉起的新会话误清)。
-                        let same_generation = slot
-                            .as_ref()
-                            .map(|current| current.session.generation == session_generation)
-                            .unwrap_or(false);
-                        if same_generation {
-                            *slot = None;
-                            drop(slot);
-                            let _ = broadcast.send(BrowserEvent::Exited);
-                        }
-                        Ok(())
-                    }
-                })
-                .await;
+            let _ = exit.await;
+            clear_session_if(&inner_slot, &broadcast, generation).await;
         });
-        *self.inner.lock().await = Some(inner);
-        self.broadcast(BrowserEvent::TabsChanged);
+        // 退出看护 2:进程存活轮询(浏览器被杀时事件流可能静默停摆,这里兜底)。
+        let inner_slot = self.inner.clone();
+        let broadcast = self.event_broadcast.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                let mut slot = inner_slot.lock().await;
+                let Some(current) = slot.as_mut() else { break };
+                if current.session.generation != generation {
+                    break;
+                }
+                match current.session.browser.try_wait() {
+                    Ok(Some(_)) | Err(_) => {
+                        *slot = None;
+                        drop(slot);
+                        let _ = broadcast.send(BrowserEvent::Exited);
+                        break;
+                    }
+                    Ok(None) => {}
+                }
+            }
+        });
         Ok(())
     }
 
-    /// 事件回注句柄(闭包捕获用;与 BrowserManager 解耦避免自引用)。
-    fn event_sink(&self) -> EventSink {
-        EventSink {
-            broadcast: self.event_broadcast.clone(),
-            dialogs: self.pending_dialogs.clone(),
-            network: self.network_log.clone(),
-        }
-    }
-
-    /// 给单个 Page 挂监听。
-    fn wire_page(&self, tab_id: String, page: Page) {
-        let sink = self.event_sink();
-
-        // screencast 帧回调:每个 Page 只注册一次。
-        // playwright-rs 的 `on_frame` 只支持追加(没有反注册 API),而前端
-        // 会在挂载/重连/切 tab 时反复调 startScreencast——若在那里注册,
-        // 帧会被重复推送 N 次。这里一次性注册,start/stop 只控制开关。
-        let frame_broadcast = self.event_broadcast.clone();
-        let frame_tab = tab_id.clone();
-        let frame_page = page.clone();
-        page.screencast().on_frame(move |frame| {
-            let broadcast = frame_broadcast.clone();
-            let tab = frame_tab.clone();
-            let viewport = frame_page.viewport_size().map(|size| FrameViewport {
-                width: size.width,
-                height: size.height,
-            });
-            async move {
-                use base64::Engine;
-                let data = base64::engine::general_purpose::STANDARD.encode(&frame.data);
-                let _ = broadcast.send(BrowserEvent::Frame {
-                    tab_id: tab,
-                    data,
-                    viewport,
+    /// 浏览器级 target 销毁监听(页面被外部关闭时清注册表)。
+    fn spawn_target_destroyed_watcher(
+        &self,
+        mut events: chromiumoxide::listeners::EventStream<EventTargetDestroyed>,
+    ) {
+        let inner_slot = self.inner.clone();
+        let broadcast = self.event_broadcast.clone();
+        let target_ids = self.target_ids.clone();
+        let ref_tables = self.ref_tables.clone();
+        let dialogs = self.pending_dialogs.clone();
+        tokio::spawn(async move {
+            while let Some(event) = events.next().await {
+                let target = serde_str_id(&event.target_id);
+                let tab = target_ids.lock().ok().and_then(|mut map| {
+                    let found = map
+                        .iter()
+                        .find(|(_, value)| **value == target)
+                        .map(|(key, _)| key.clone());
+                    if let Some(tab) = &found {
+                        map.remove(tab);
+                    }
+                    found
                 });
-                Ok(())
+                let Some(tab) = tab else { continue };
+                if let Some(inner) = inner_slot.lock().await.as_mut() {
+                    inner.unregister(&tab);
+                }
+                if let Ok(mut tables) = ref_tables.lock() {
+                    tables.remove(&tab);
+                }
+                if let Ok(mut map) = dialogs.lock() {
+                    map.remove(&tab);
+                }
+                let _ = broadcast.send(BrowserEvent::DialogClosed { tab_id: tab.clone() });
+                let _ = broadcast.send(BrowserEvent::TabsChanged);
             }
         });
+    }
 
-        // 导航完成。
-        let nav_sink = sink.clone();
-        let nav_tab = tab_id.clone();
-        let nav_page = page.clone();
-        tokio::spawn(async move {
-            let tab = nav_tab.clone();
-            let _ = nav_page
-                .on_load(move || {
-                    let sink = nav_sink.clone();
-                    let tab = tab.clone();
-                    async move {
-                        sink.broadcast(BrowserEvent::Navigated {
-                            tab_id: tab,
-                            url: String::new(),
-                            title: String::new(),
-                        });
-                        Ok(())
-                    }
-                })
-                .await;
-        });
+    /// 给单个 Page 挂事件监听(帧/导航/弹窗/网络)。
+    async fn wire_page(&self, tab_id: String, page: Page) {
+        // 记录 target 映射(页面被外部关闭时按 targetId 反查 tab)。
+        if let Ok(mut ids) = self.target_ids.lock() {
+            ids.insert(tab_id.clone(), serde_str_id(page.target_id()));
+        }
 
-        // JS dialog:挂起记录,等模型/面板处理。
-        let dialog_sink = sink.clone();
-        let dialog_tab = tab_id.clone();
-        let dialog_page = page.clone();
-        tokio::spawn(async move {
-            let _ = dialog_page
-                .on_dialog(move |dialog| {
-                    let sink = dialog_sink.clone();
-                    let tab = dialog_tab.clone();
-                    async move {
-                        let kind = dialog.type_().to_string();
-                        let message = dialog.message().to_string();
-                        sink.remember_dialog(&tab, &kind, &message, dialog.clone());
-                        sink.broadcast(BrowserEvent::DialogOpened {
-                            tab_id: tab,
-                            kind,
-                            message,
-                        });
-                        // 交给模型/面板处置:不自动 accept。
-                        Ok(())
-                    }
-                })
-                .await;
-        });
+        // 网络:先 enable 再注册(否则早期请求会丢)。
+        if let Err(error) = page.execute(NetworkEnableParams::builder().build()).await {
+            tracing::warn!("Network 域启用失败(网络抓包可能不完整): {error}");
+        }
 
-        // 网络请求:记录进环形缓冲;requestId 用合成序号(request+response
-        // 两路共用,networkGetBody 据此取响应体)。
-        let net_sink = sink.clone();
-        let net_tab = tab_id.clone();
-        let net_page = page.clone();
-        let net_inflight = self.inflight.clone();
-        let net_seq = self.request_seq.clone();
-        tokio::spawn(async move {
-            let _ = net_page
-                .on_request(move |request| {
-                    let sink = net_sink.clone();
-                    let tab = net_tab.clone();
-                    let inflight = net_inflight.clone();
-                    let seq = net_seq.clone();
-                    async move {
-                        let url = request.url().to_string();
-                        let request_id = format!("{tab}-r{}", seq.fetch_add(1, Ordering::Relaxed));
-                        if let Ok(mut map) = inflight.lock() {
-                            map.insert((tab.clone(), url), request_id.clone());
-                        }
-                        let entry = json!({
-                            "requestId": request_id,
-                            "url": request.url(),
-                            "method": request.method(),
-                            "resourceType": request.resource_type(),
-                            "postData": request.post_data(),
-                            "headers": request.headers(),
-                            "atMs": now_ms(),
-                        });
-                        sink.network_record(&tab, &request_id, entry);
-                        Ok(())
-                    }
-                })
-                .await;
-        });
+        // screencast 帧 → SSE;帧需回执,不回执会停发。
+        let broadcast = self.event_broadcast.clone();
+        let page_frames = page.clone();
+        let tab_frames = tab_id.clone();
+        if let Ok(mut frames) = page.event_listener::<EventScreencastFrame>().await {
+            tokio::spawn(async move {
+                while let Some(frame) = frames.next().await {
+                    let data: &str = frame.data.as_ref();
+                    let viewport = FrameViewport {
+                        width: frame.metadata.device_width.max(0.0) as u32,
+                        height: frame.metadata.device_height.max(0.0) as u32,
+                    };
+                    let _ = broadcast.send(BrowserEvent::Frame {
+                        tab_id: tab_frames.clone(),
+                        data: data.to_string(),
+                        viewport: Some(viewport),
+                    });
+                    let _ = page_frames
+                        .execute(ScreencastFrameAckParams::new(frame.session_id))
+                        .await;
+                }
+            });
+        }
 
-        // 网络响应:补记状态码/响应头,并存 Response 句柄供 networkGetBody。
-        let resp_tab = tab_id.clone();
-        let resp_page = page.clone();
-        let resp_inflight = self.inflight.clone();
-        let manager_bodies = self.bodies.clone();
-        let resp_sink = sink.clone();
-        tokio::spawn(async move {
-            let tab = resp_tab.clone();
-            let inflight = resp_inflight.clone();
-            let bodies = manager_bodies.clone();
-            let _ = resp_page
-                .on_response(move |response| {
-                    let sink = resp_sink.clone();
-                    let tab = tab.clone();
-                    let inflight = inflight.clone();
-                    let bodies = bodies.clone();
-                    async move {
-                        let url = response.url().to_string();
-                        let request_id = inflight
-                            .lock()
-                            .ok()
-                            .and_then(|map| map.get(&(tab.clone(), url)).cloned());
-                        let Some(request_id) = request_id else {
-                            return Ok(());
-                        };
-                        // 元数据合并进抓包条目(status + content-type)。
-                        let content_type = response
-                            .raw_headers()
-                            .await
-                            .ok()
-                            .and_then(|headers| {
-                                headers
-                                    .iter()
-                                    .find(|entry| entry.name.eq_ignore_ascii_case("content-type"))
-                                    .map(|entry| entry.value.clone())
-                            })
-                            .unwrap_or_default();
-                        sink.network_record(
-                            &tab,
-                            &request_id,
-                            json!({ "status": response.status(), "contentType": content_type }),
-                        );
-                        // 存 Response 句柄:networkGetBody 据此取响应体。
-                        // 环形语义:超上限整表丢弃(旧响应体不再可取)。
-                        let mut map = bodies.lock().await;
-                        if map.len() > 400 {
-                            map.clear();
-                        }
-                        map.insert(request_id, (response.clone(), content_type));
-                        Ok(())
+        // 主框架导航 → 清 ref 表(backendNodeId 跨文档失效)+ 广播。
+        let broadcast = self.event_broadcast.clone();
+        let tab_nav = tab_id.clone();
+        let ref_tables = self.ref_tables.clone();
+        if let Ok(mut events) = page.event_listener::<EventFrameNavigated>().await {
+            tokio::spawn(async move {
+                while let Some(event) = events.next().await {
+                    if event.frame.parent_id.is_some() {
+                        continue;
                     }
-                })
-                .await;
-        });
+                    if let Ok(mut tables) = ref_tables.lock() {
+                        tables.remove(&tab_nav);
+                    }
+                    let _ = broadcast.send(BrowserEvent::Navigated {
+                        tab_id: tab_nav.clone(),
+                        url: event.frame.url.clone(),
+                        title: String::new(),
+                    });
+                }
+            });
+        }
 
-        // 页面关闭:清 dialog 并广播。
-        let close_sink = sink.clone();
-        let close_tab = tab_id;
-        tokio::spawn(async move {
-            let _ = page
-                .on_close(move || {
-                    let sink = close_sink.clone();
-                    let tab = close_tab.clone();
-                    async move {
-                        sink.clear_dialog(&tab);
-                        sink.broadcast(BrowserEvent::DialogClosed { tab_id: tab });
-                        Ok(())
+        // JS 弹窗:挂起记录,等模型/面板用 getDialog/handleDialog 处置。
+        let broadcast = self.event_broadcast.clone();
+        let dialogs = self.pending_dialogs.clone();
+        let tab_dialog = tab_id.clone();
+        if let Ok(mut events) = page.event_listener::<EventJavascriptDialogOpening>().await {
+            tokio::spawn(async move {
+                while let Some(event) = events.next().await {
+                    let kind = serde_str_id(&event.r#type);
+                    let message = event.message.clone();
+                    if let Ok(mut map) = dialogs.lock() {
+                        map.insert(tab_dialog.clone(), json!({ "type": kind, "message": message }));
                     }
-                })
-                .await;
-        });
+                    let _ = broadcast.send(BrowserEvent::DialogOpened {
+                        tab_id: tab_dialog.clone(),
+                        kind,
+                        message,
+                    });
+                }
+            });
+        }
+
+        // 网络请求/响应 → 环形缓冲(requestId 直接用 CDP 原生 id)。
+        let log = self.network_log.clone();
+        let tab_net = tab_id.clone();
+        if let Ok(mut events) = page.event_listener::<EventRequestWillBeSent>().await {
+            tokio::spawn(async move {
+                while let Some(event) = events.next().await {
+                    let request = &event.request;
+                    let resource_type = event.r#type.as_ref().map(serde_str_id).unwrap_or_default();
+                    let entry = json!({
+                        "url": request.url,
+                        "method": request.method,
+                        "resourceType": resource_type,
+                        "hasPostData": request.has_post_data,
+                        "headers": serde_json::to_value(&request.headers).unwrap_or(Value::Null),
+                        "atMs": now_ms(),
+                    });
+                    if let Ok(mut guard) = log.lock() {
+                        guard.record(&tab_net, &serde_str_id(&event.request_id), entry);
+                    }
+                }
+            });
+        }
+        let log = self.network_log.clone();
+        let tab_net = tab_id.clone();
+        if let Ok(mut events) = page.event_listener::<EventResponseReceived>().await {
+            tokio::spawn(async move {
+                while let Some(event) = events.next().await {
+                    let response = &event.response;
+                    let entry = json!({
+                        "status": response.status,
+                        "contentType": response.mime_type,
+                        "atMs": now_ms(),
+                    });
+                    if let Ok(mut guard) = log.lock() {
+                        guard.record(&tab_net, &serde_str_id(&event.request_id), entry);
+                    }
+                }
+            });
+        }
+        let log = self.network_log.clone();
+        let tab_net = tab_id.clone();
+        if let Ok(mut events) = page.event_listener::<EventLoadingFailed>().await {
+            tokio::spawn(async move {
+                while let Some(event) = events.next().await {
+                    let entry = json!({ "failed": event.error_text, "atMs": now_ms() });
+                    if let Ok(mut guard) = log.lock() {
+                        guard.record(&tab_net, &serde_str_id(&event.request_id), entry);
+                    }
+                }
+            });
+        }
     }
 
     /// 执行一条浏览器命令。
     pub async fn execute(&self, command: BrowserCommand) -> CommandOutcome {
         let started = Instant::now();
-        // 命令串行化:Playwright 的 Page 句柄在 tab 关闭后会失效,
-        // 并发命令交叉使用会报 TargetClosed。
+        // 命令串行化:并发命令交叉使用同一 Page/会话易触发竞态。
         let _gate = self.command_gate.lock().await;
         if let Err(error) = self.get_or_start().await {
             return CommandOutcome::err("not_running", error, started.elapsed().as_millis() as u64);
         }
-        // 弹窗竞速:命令执行中页面弹出 JS dialog 时,Playwright 的动作调用
-        // 会被挂起的 dialog 卡到超时(30s)。这里订阅事件流,一旦 DialogOpened
-        // 就提前返回弹窗信息,模型用 getDialog/handleDialog 处置——对齐旧版
-        // "命令即时返回、弹窗挂起等待处理"的语义。广播是多消费者,这里
-        // 消费不影响 SSE 前端;非 DialogOpened 事件(导航/tab 变化)继续等。
+        // 弹窗竞速:命令执行中页面弹出 JS dialog 时,动作调用会被挂起的
+        // dialog 卡到超时;这里订阅事件流,一旦 DialogOpened 就提前返回弹窗
+        // 信息,模型用 getDialog/handleDialog 处置——对齐"命令即时返回、
+        // 弹窗挂起等待处理"的语义。
         let mut event_rx = self.event_broadcast.subscribe();
         let outcome = tokio::select! {
             result = self.dispatch(command) => match result {
@@ -779,9 +803,11 @@ impl BrowserManager {
                     }),
                     started.elapsed().as_millis() as u64,
                 ),
-                None => {
-                    CommandOutcome::err("command_failed", "事件流中断", started.elapsed().as_millis() as u64)
-                }
+                None => CommandOutcome::err(
+                    "command_failed",
+                    "事件流中断",
+                    started.elapsed().as_millis() as u64,
+                ),
             },
         };
         CommandOutcome {
@@ -816,22 +842,43 @@ impl BrowserManager {
                 }
                 let page = inner
                     .session
-                    .context
-                    .new_page()
+                    .browser
+                    .new_page("about:blank")
                     .await
                     .map_err(|error| format!("新建标签页失败: {error}"))?;
-                let target = url.unwrap_or_else(|| "about:blank".to_string());
-                let mut title = String::new();
-                if target != "about:blank" {
-                    page.goto(&target, None)
-                        .await
-                        .map_err(|error| format!("导航失败: {error}"))?;
-                    title = page.title().await.unwrap_or_default();
-                }
-                let tab_id = inner.register(page.clone(), target.clone(), title.clone());
+                let tab_id = inner.register(page.clone(), "about:blank".to_string(), String::new());
                 inner.active_tab = Some(tab_id.clone());
                 drop(guard);
-                self.wire_page(tab_id.clone(), page);
+                // 先挂监听再导航,避免错过早期事件(网络/导航/弹窗)。
+                self.wire_page(tab_id.clone(), page.clone()).await;
+                if let Some(url) = url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty() && *value != "about:blank")
+                {
+                    let response = page
+                        .execute(
+                            NavigateParams::builder()
+                                .url(url.to_string())
+                                .build()
+                                .unwrap(),
+                        )
+                        .await
+                        .map_err(|error| format!("导航失败: {error}"))?;
+                    if let Some(error_text) = response.result.error_text.clone() {
+                        return Err(format!("导航失败: {error_text}"));
+                    }
+                    wait_for_load(&page, Duration::from_secs(15)).await;
+                }
+                let (target, title) = {
+                    let mut guard = self.inner.lock().await;
+                    let inner = guard.as_mut().ok_or_else(|| "浏览器未启动".to_string())?;
+                    inner.refresh_meta(&tab_id).await;
+                    match inner.tabs.get(&tab_id) {
+                        Some(info) => (info.url.clone(), info.title.clone()),
+                        None => (String::new(), String::new()),
+                    }
+                };
                 self.broadcast(BrowserEvent::TabsChanged);
                 Ok(CommandOutcome::ok_value(
                     json!({ "tabId": tab_id, "url": target, "title": title }),
@@ -840,9 +887,8 @@ impl BrowserManager {
             }
             BrowserCommand::Close { tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                // 关掉的正是被投屏的 tab:停流,免得前端停在最后一帧。
                 if inner.screencast_tab.as_deref() == Some(tab_id.as_str()) {
-                    let _ = page.screencast().stop().await;
+                    let _ = page.execute(StopScreencastParams::default()).await;
                     inner.screencast_tab = None;
                 }
                 page.close()
@@ -850,80 +896,102 @@ impl BrowserManager {
                     .map_err(|error| format!("关闭标签页失败: {error}"))?;
                 inner.unregister(&tab_id);
                 drop(guard);
+                self.forget_tab(&tab_id);
                 self.broadcast(BrowserEvent::TabsChanged);
                 Ok(CommandOutcome::ok_value(json!({ "closed": tab_id }), 0))
             }
+
             BrowserCommand::Activate { tab_id } => {
                 if !inner.pages.contains_key(&tab_id) {
                     return Err(format!("tab 不存在: {tab_id}"));
                 }
                 inner.active_tab = Some(tab_id.clone());
                 let page = inner.page(&tab_id)?;
-                let _ = page.bring_to_front().await;
+                let target = page.target_id().clone();
+                let _ = inner
+                    .session
+                    .browser
+                    .execute(ActivateTargetParams::new(target))
+                    .await;
                 drop(guard);
                 self.broadcast(BrowserEvent::TabsChanged);
-                Ok(CommandOutcome::ok_value(
-                    json!({ "activeTabId": tab_id }),
-                    0,
-                ))
+                Ok(CommandOutcome::ok_value(json!({ "activeTabId": tab_id }), 0))
             }
             BrowserCommand::Navigate { url, tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let response = page
-                    .goto(&url, None)
+                    .execute(
+                        NavigateParams::builder()
+                            .url(url.clone())
+                            .build()
+                            .unwrap(),
+                    )
                     .await
                     .map_err(|error| format!("导航失败: {error}"))?;
+                if let Some(error_text) = response.result.error_text.clone() {
+                    return Err(format!("导航失败: {error_text}"));
+                }
+                wait_for_load(&page, Duration::from_secs(15)).await;
                 inner.refresh_meta(&tab_id).await;
-                let status = response.as_ref().map(|r| r.status());
                 drop(guard);
+                let status = self.latest_document_status(&tab_id);
                 self.broadcast(BrowserEvent::Navigated {
                     tab_id: tab_id.clone(),
                     url: url.clone(),
                     title: String::new(),
                 });
-                Ok(CommandOutcome::ok_value(
-                    json!({ "url": url, "status": status }),
-                    0,
-                ))
+                Ok(CommandOutcome::ok_value(json!({ "url": url, "status": status }), 0))
             }
             BrowserCommand::Back { tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let response = page
-                    .go_back(None)
+                let history = page
+                    .execute(GetNavigationHistoryParams::default())
+                    .await
+                    .map_err(|error| format!("取导航历史失败: {error}"))?;
+                let index = history.current_index;
+                if index <= 0 {
+                    return Err("没有可后退的历史".to_string());
+                }
+                let entry = history
+                    .entries
+                    .get((index - 1) as usize)
+                    .ok_or_else(|| "没有可后退的历史".to_string())?;
+                page.execute(NavigateToHistoryEntryParams::new(entry.id))
                     .await
                     .map_err(|error| format!("后退失败: {error}"))?;
+                wait_for_load(&page, Duration::from_secs(5)).await;
                 inner.refresh_meta(&tab_id).await;
-                let url = page.url();
-                Ok(CommandOutcome::ok_value(
-                    json!({ "url": url, "status": response.as_ref().map(|r| r.status()) }),
-                    0,
-                ))
+                let url = elements::page_url(&page).await;
+                Ok(CommandOutcome::ok_value(json!({ "url": url }), 0))
             }
             BrowserCommand::Forward { tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let response = page
-                    .go_forward(None)
+                let history = page
+                    .execute(GetNavigationHistoryParams::default())
+                    .await
+                    .map_err(|error| format!("取导航历史失败: {error}"))?;
+                let next = (history.current_index + 1) as usize;
+                if next >= history.entries.len() {
+                    return Err("没有可前进的历史".to_string());
+                }
+                let entry = &history.entries[next];
+                page.execute(NavigateToHistoryEntryParams::new(entry.id))
                     .await
                     .map_err(|error| format!("前进失败: {error}"))?;
+                wait_for_load(&page, Duration::from_secs(5)).await;
                 inner.refresh_meta(&tab_id).await;
-                let url = page.url();
-                Ok(CommandOutcome::ok_value(
-                    json!({ "url": url, "status": response.as_ref().map(|r| r.status()) }),
-                    0,
-                ))
+                let url = elements::page_url(&page).await;
+                Ok(CommandOutcome::ok_value(json!({ "url": url }), 0))
             }
             BrowserCommand::Reload { tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let response = page
-                    .reload(None)
+                page.execute(ReloadParams::builder().build())
                     .await
                     .map_err(|error| format!("刷新失败: {error}"))?;
+                wait_for_load(&page, Duration::from_secs(10)).await;
                 inner.refresh_meta(&tab_id).await;
-                let url = page.url();
-                Ok(CommandOutcome::ok_value(
-                    json!({ "url": url, "status": response.as_ref().map(|r| r.status()) }),
-                    0,
-                ))
+                let url = elements::page_url(&page).await;
+                Ok(CommandOutcome::ok_value(json!({ "url": url }), 0))
             }
             BrowserCommand::Snapshot {
                 tab_id,
@@ -932,17 +1000,16 @@ impl BrowserManager {
             } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let _ = include_hidden;
-                let options = AriaSnapshotOptions::default().mode(AriaSnapshotMode::Ai);
-                let mut snapshot = page
-                    .aria_snapshot(Some(options))
-                    .await
-                    .map_err(|error| format!("生成页面快照失败: {error}"))?;
-                // 按元素数截断(每个 `[ref=` 是一个可交互元素)。
+                let snapshot = elements::snapshot(&page).await?;
+                let mut text = snapshot.text;
+                if let Ok(mut tables) = self.ref_tables.lock() {
+                    tables.insert(tab_id.clone(), snapshot.refs);
+                }
                 let mut truncated = false;
                 if let Some(max) = max_elements {
                     let mut seen = 0usize;
                     let mut cut: Option<usize> = None;
-                    for (idx, _) in snapshot.match_indices("[ref=") {
+                    for (idx, _) in text.match_indices("[ref=") {
                         seen += 1;
                         if seen > max as usize {
                             cut = Some(idx);
@@ -950,18 +1017,22 @@ impl BrowserManager {
                         }
                     }
                     if let Some(idx) = cut {
-                        snapshot.truncate(idx);
+                        text.truncate(idx);
                         truncated = true;
                     }
                 }
                 inner.refresh_meta(&tab_id).await;
-                let url = page.url();
-                let title = page.title().await.unwrap_or_default();
+                let url = elements::page_url(&page).await;
+                let title = inner
+                    .tabs
+                    .get(&tab_id)
+                    .map(|info| info.title.clone())
+                    .unwrap_or_default();
                 Ok(CommandOutcome::ok_value(
                     json!({
                         "url": url,
                         "title": title,
-                        "elements": snapshot,
+                        "elements": text,
                         "truncated": truncated,
                     }),
                     0,
@@ -974,28 +1045,45 @@ impl BrowserManager {
             } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let mut builder =
-                    ScreenshotOptions::builder().full_page(full_page.unwrap_or(false));
+                    CaptureScreenshotParams::builder().format(CaptureScreenshotFormat::Png);
                 if let Some(rect) = clip {
-                    builder = builder.clip(ScreenshotClip {
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.width,
-                        height: rect.height,
-                    });
+                    builder = builder
+                        .clip(ClipViewport {
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                            scale: 1.0,
+                        })
+                        .capture_beyond_viewport(true);
+                } else if full_page.unwrap_or(false) {
+                    let metrics = page
+                        .execute(GetLayoutMetricsParams::default())
+                        .await
+                        .map_err(|error| format!("取页面尺寸失败: {error}"))?;
+                    let size = metrics.result.css_content_size;
+                    builder = builder
+                        .clip(ClipViewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: size.width,
+                            height: size.height,
+                            scale: 1.0,
+                        })
+                        .capture_beyond_viewport(true);
                 }
-                let bytes = page
-                    .screenshot(Some(builder.build()))
+                let result = page
+                    .execute(builder.build())
                     .await
                     .map_err(|error| format!("截图失败: {error}"))?;
-                use base64::Engine;
-                let base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let base64: &str = result.data.as_ref();
                 Ok(CommandOutcome {
                     ok: true,
                     error: None,
                     value: None,
                     state: None,
                     image: Some(crate::ImagePayload {
-                        base64,
+                        base64: base64.to_string(),
                         mime_type: "image/png".to_string(),
                     }),
                     snapshot: None,
@@ -1004,6 +1092,7 @@ impl BrowserManager {
                     elapsed_ms: 0,
                 })
             }
+
             BrowserCommand::Click {
                 tab_id,
                 r#ref,
@@ -1013,26 +1102,21 @@ impl BrowserManager {
                 button,
                 double_click,
             } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let button = parse_button(button.as_deref());
+                let click_count = if double_click.unwrap_or(false) { 2 } else { 1 };
                 match pick_target(r#ref.as_deref(), locator.as_deref()) {
                     Some(target) => {
-                        let options = playwright_rs::protocol::ClickOptions::builder()
-                            .button(parse_button(button.as_deref()))
-                            .click_count(if double_click.unwrap_or(false) { 2 } else { 1 })
-                            .build();
-                        page.locator(&target)
-                            .click(Some(options))
-                            .await
-                            .map_err(|error| format!("点击失败({target}): {error}"))?;
+                        let backend =
+                            elements::resolve_element(&page, &self.ref_table(&tab_id), &target)
+                                .await?;
+                        elements::click_backend(&page, backend, button, click_count).await?;
                         Ok(CommandOutcome::ok_value(json!({ "clicked": target }), 0))
                     }
                     None => {
                         let x = x.ok_or_else(|| "click 需要 ref/locator 或 x,y".to_string())?;
                         let y = y.ok_or_else(|| "click 需要 ref/locator 或 x,y".to_string())?;
-                        page.mouse()
-                            .click(x, y, None)
-                            .await
-                            .map_err(|error| format!("点击失败({x},{y}): {error}"))?;
+                        elements::click_point(&page, x, y, button, click_count).await?;
                         Ok(CommandOutcome::ok_value(json!({ "clickedAt": [x, y] }), 0))
                     }
                 }
@@ -1042,12 +1126,11 @@ impl BrowserManager {
                 r#ref,
                 value,
             } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let target = normalize_target(&r#ref);
-                page.locator(&target)
-                    .fill(&value, None)
-                    .await
-                    .map_err(|error| format!("填值失败({target}): {error}"))?;
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let target = elements::normalize_ref(&r#ref);
+                let backend = elements::resolve_element(&page, &self.ref_table(&tab_id), &target)
+                    .await?;
+                elements::fill_backend(&page, backend, &value).await?;
                 Ok(CommandOutcome::ok_value(json!({ "filled": target }), 0))
             }
             BrowserCommand::Type {
@@ -1055,64 +1138,39 @@ impl BrowserManager {
                 r#ref,
                 text,
             } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                match r#ref {
-                    Some(target) => {
-                        let target = normalize_target(&target);
-                        page.locator(&target)
-                            .press_sequentially(&text, None)
-                            .await
-                            .map_err(|error| format!("输入失败({target}): {error}"))?;
-                    }
-                    None => {
-                        page.keyboard()
-                            .type_text(&text, None)
-                            .await
-                            .map_err(|error| format!("输入失败: {error}"))?;
-                    }
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                if let Some(reference) = r#ref.as_deref().map(elements::normalize_ref) {
+                    let backend =
+                        elements::resolve_element(&page, &self.ref_table(&tab_id), &reference)
+                            .await?;
+                    elements::focus_backend(&page, backend).await?;
                 }
+                elements::type_text(&page, &text).await?;
                 Ok(CommandOutcome::ok_value(json!({ "typed": text.len() }), 0))
             }
             BrowserCommand::Press { tab_id, key, r#ref } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                match r#ref {
-                    Some(target) => {
-                        let target = normalize_target(&target);
-                        page.locator(&target)
-                            .press(&key, None)
-                            .await
-                            .map_err(|error| format!("按键失败({target}): {error}"))?;
-                    }
-                    None => {
-                        page.keyboard()
-                            .press(&key, None)
-                            .await
-                            .map_err(|error| format!("按键失败: {error}"))?;
-                    }
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                if let Some(reference) = r#ref.as_deref().map(elements::normalize_ref) {
+                    let backend =
+                        elements::resolve_element(&page, &self.ref_table(&tab_id), &reference)
+                            .await?;
+                    elements::focus_backend(&page, backend).await?;
                 }
+                elements::press_key(&page, &key).await?;
                 Ok(CommandOutcome::ok_value(json!({ "pressed": key }), 0))
             }
-            BrowserCommand::Hover {
-                tab_id,
-                r#ref,
-                x,
-                y,
-            } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                match (r#ref, x, y) {
-                    (Some(target), _, _) => {
-                        let target = normalize_target(&target);
-                        page.locator(&target)
-                            .hover(None)
-                            .await
-                            .map_err(|error| format!("悬停失败({target}): {error}"))?;
-                        Ok(CommandOutcome::ok_value(json!({ "hovered": target }), 0))
+            BrowserCommand::Hover { tab_id, r#ref, x, y } => {
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                match (r#ref.as_deref().map(elements::normalize_ref), x, y) {
+                    (Some(reference), _, _) => {
+                        let backend =
+                            elements::resolve_element(&page, &self.ref_table(&tab_id), &reference)
+                                .await?;
+                        elements::hover_backend(&page, backend).await?;
+                        Ok(CommandOutcome::ok_value(json!({ "hovered": reference }), 0))
                     }
                     (None, Some(x), Some(y)) => {
-                        page.mouse()
-                            .move_to(x, y, None)
-                            .await
-                            .map_err(|error| format!("悬停失败({x},{y}): {error}"))?;
+                        elements::hover_point(&page, x, y).await?;
                         Ok(CommandOutcome::ok_value(json!({ "hoveredAt": [x, y] }), 0))
                     }
                     _ => Err("hover 需要 ref/locator 或 x,y".to_string()),
@@ -1126,29 +1184,26 @@ impl BrowserManager {
                 delta_x,
                 delta_y,
             } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                match r#ref {
-                    Some(target) => {
-                        let target = normalize_target(&target);
-                        page.locator(&target)
-                            .scroll_into_view_if_needed()
-                            .await
-                            .map_err(|error| format!("滚动到元素失败({target}): {error}"))?;
-                        Ok(CommandOutcome::ok_value(json!({ "scrolledTo": target }), 0))
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                match r#ref.as_deref().map(elements::normalize_ref) {
+                    Some(reference) => {
+                        let backend =
+                            elements::resolve_element(&page, &self.ref_table(&tab_id), &reference)
+                                .await?;
+                        elements::scroll_into_view(&page, backend).await?;
+                        Ok(CommandOutcome::ok_value(json!({ "scrolledTo": reference }), 0))
                     }
                     None => {
                         let dx = delta_x.unwrap_or(0.0);
                         let dy = delta_y.unwrap_or(360.0);
-                        if let (Some(x), Some(y)) = (x, y) {
-                            page.mouse()
-                                .move_to(x, y, None)
-                                .await
-                                .map_err(|error| format!("移动鼠标失败: {error}"))?;
+                        match (x, y) {
+                            (Some(x), Some(y)) => {
+                                elements::wheel(&page, x, y, dx, dy).await?;
+                            }
+                            _ => {
+                                elements::wheel_at_center(&page, dx, dy).await?;
+                            }
                         }
-                        page.mouse()
-                            .wheel(dx, dy)
-                            .await
-                            .map_err(|error| format!("滚动失败: {error}"))?;
                         Ok(CommandOutcome::ok_value(json!({ "scrolled": [dx, dy] }), 0))
                     }
                 }
@@ -1158,17 +1213,11 @@ impl BrowserManager {
                 r#ref,
                 values,
             } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let target = normalize_target(&r#ref);
-                let locator = page.locator(&target);
-                let mut selected = Vec::new();
-                for value in &values {
-                    let picked = locator
-                        .select_option(SelectOption::Value(value.clone()), None)
-                        .await
-                        .map_err(|error| format!("选择失败({target}): {error}"))?;
-                    selected.extend(picked);
-                }
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let target = elements::normalize_ref(&r#ref);
+                let backend = elements::resolve_element(&page, &self.ref_table(&tab_id), &target)
+                    .await?;
+                let selected = elements::select_backend(&page, backend, &values).await?;
                 Ok(CommandOutcome::ok_value(json!({ "selected": selected }), 0))
             }
             BrowserCommand::Check {
@@ -1176,20 +1225,15 @@ impl BrowserManager {
                 r#ref,
                 checked,
             } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let target = normalize_target(&r#ref);
-                let loc = page.locator(&target);
-                if checked.unwrap_or(true) {
-                    loc.check(None)
-                        .await
-                        .map_err(|error| format!("勾选失败({target}): {error}"))?;
-                } else {
-                    loc.uncheck(None)
-                        .await
-                        .map_err(|error| format!("取消勾选失败({target}): {error}"))?;
-                }
-                Ok(CommandOutcome::ok_value(json!({ "checked": target }), 0))
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let target = elements::normalize_ref(&r#ref);
+                let backend = elements::resolve_element(&page, &self.ref_table(&tab_id), &target)
+                    .await?;
+                let state =
+                    elements::check_backend(&page, backend, checked.unwrap_or(true)).await?;
+                Ok(CommandOutcome::ok_value(json!({ "checked": state }), 0))
             }
+
             BrowserCommand::Drag {
                 tab_id,
                 from_ref,
@@ -1197,15 +1241,20 @@ impl BrowserManager {
                 from,
                 to,
             } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let refs = self.ref_table(&tab_id);
                 match (from_ref, to_ref) {
                     (Some(from_ref), Some(to_ref)) => {
-                        let from_target = normalize_target(&from_ref);
-                        let to_target = normalize_target(&to_ref);
-                        page.locator(&from_target)
-                            .drag_to(&page.locator(&to_target), None)
-                            .await
-                            .map_err(|error| format!("拖拽失败: {error}"))?;
+                        let from_target = elements::normalize_ref(&from_ref);
+                        let to_target = elements::normalize_ref(&to_ref);
+                        let from_backend =
+                            elements::resolve_element(&page, &refs, &from_target).await?;
+                        let to_backend =
+                            elements::resolve_element(&page, &refs, &to_target).await?;
+                        let _ = elements::scroll_into_view(&page, from_backend).await;
+                        let start = elements::element_center(&page, from_backend).await?;
+                        let end = elements::element_center(&page, to_backend).await?;
+                        elements::drag(&page, start, end).await?;
                         Ok(CommandOutcome::ok_value(
                             json!({ "dragged": [from_target, to_target] }),
                             0,
@@ -1216,50 +1265,26 @@ impl BrowserManager {
                             from.ok_or_else(|| "drag 需要 fromRef/toRef 或 from/to".to_string())?;
                         let to =
                             to.ok_or_else(|| "drag 需要 fromRef/toRef 或 from/to".to_string())?;
-                        let mouse = page.mouse();
-                        mouse
-                            .move_to(from.x, from.y, None)
-                            .await
-                            .map_err(|error| format!("拖拽失败: {error}"))?;
-                        mouse
-                            .down(None)
-                            .await
-                            .map_err(|error| format!("拖拽失败: {error}"))?;
-                        mouse
-                            .move_to(to.x, to.y, None)
-                            .await
-                            .map_err(|error| format!("拖拽失败: {error}"))?;
-                        mouse
-                            .up(None)
-                            .await
-                            .map_err(|error| format!("拖拽失败: {error}"))?;
+                        elements::drag(&page, (from.x, from.y), (to.x, to.y)).await?;
                         Ok(CommandOutcome::ok_value(json!({ "dragged": true }), 0))
                     }
                 }
             }
             BrowserCommand::ElementInfo { tab_id, x, y } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let info: Value = page
-                    .evaluate(
-                        &format!(
-                            "() => {{ const el = document.elementFromPoint({x}, {y}); \
-                             if (!el) return null; const r = el.getBoundingClientRect(); \
-                             return {{ tag: el.tagName, id: el.id, cls: el.className, \
-                             text: (el.innerText||'').slice(0,200), \
-                             rect: {{x:r.x,y:r.y,width:r.width,height:r.height}} }}; }}"
-                        ),
-                        None::<&()>,
-                    )
-                    .await
-                    .map_err(|error| format!("取元素信息失败: {error}"))?;
+                let script = format!(
+                    "() => {{ const el = document.elementFromPoint({x}, {y}); \
+                     if (!el) return null; const r = el.getBoundingClientRect(); \
+                     return {{ tag: el.tagName, id: el.id, cls: el.className, \
+                     text: (el.innerText||'').slice(0,200), \
+                     rect: {{x:r.x,y:r.y,width:r.width,height:r.height}} }}; }}"
+                );
+                let info = elements::evaluate(&page, &script).await?;
                 Ok(CommandOutcome::ok_value(info, 0))
             }
             BrowserCommand::Evaluate { tab_id, expression } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let result: Value = page
-                    .evaluate(&expression, None::<&()>)
-                    .await
-                    .map_err(|error| format!("求值失败: {error}"))?;
+                let result = elements::evaluate(&page, &expression).await?;
                 Ok(CommandOutcome::ok_value(result, 0))
             }
             BrowserCommand::WaitFor {
@@ -1270,11 +1295,11 @@ impl BrowserManager {
                 timeout_ms,
             } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let timeout = timeout_ms.unwrap_or(30_000) as f64;
-                let options = WaitForOptions::builder().timeout(timeout).build();
+                let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
                 if let Some(selector) = selector {
-                    page.locator(&selector)
-                        .wait_for(Some(options))
+                    let escaped = escape_js_string(&selector);
+                    let script = format!("() => !!document.querySelector('{escaped}')");
+                    wait_for_condition(&page, &script, timeout)
                         .await
                         .map_err(|error| format!("等待选择器失败({selector}): {error}"))?;
                     Ok(CommandOutcome::ok_value(json!({ "found": selector }), 0))
@@ -1283,30 +1308,18 @@ impl BrowserManager {
                     let script = format!(
                         "() => document.body && document.body.innerText.includes('{escaped}')"
                     );
-                    page.wait_for_function(
-                        &script,
-                        Some(
-                            playwright_rs::protocol::WaitForFunctionOptions::default()
-                                .timeout(timeout),
-                        ),
-                    )
-                    .await
-                    .map_err(|error| format!("等待文本失败({text}): {error}"))?;
+                    wait_for_condition(&page, &script, timeout)
+                        .await
+                        .map_err(|error| format!("等待文本失败({text}): {error}"))?;
                     Ok(CommandOutcome::ok_value(json!({ "foundText": text }), 0))
                 } else if let Some(text) = text_gone {
                     let escaped = escape_js_string(&text);
                     let script = format!(
                         "() => !(document.body && document.body.innerText.includes('{escaped}'))"
                     );
-                    page.wait_for_function(
-                        &script,
-                        Some(
-                            playwright_rs::protocol::WaitForFunctionOptions::default()
-                                .timeout(timeout),
-                        ),
-                    )
-                    .await
-                    .map_err(|error| format!("等待文本消失失败({text}): {error}"))?;
+                    wait_for_condition(&page, &script, timeout)
+                        .await
+                        .map_err(|error| format!("等待文本消失失败({text}): {error}"))?;
                     Ok(CommandOutcome::ok_value(json!({ "textGone": text }), 0))
                 } else {
                     Err("waitFor 需要 selector / text / textGone 之一".to_string())
@@ -1333,55 +1346,60 @@ impl BrowserManager {
                 accept,
                 prompt_text,
             } => {
-                let (tab_id, _page) = inner.resolve(tab_id.as_deref())?;
-                // 用 dialog 事件带回的句柄处置:新建 CDP 会话看不到挂在
-                // Playwright 自己会话上的弹窗("No dialog is showing")。
-                let Some((_info, handle)) = self.take_dialog_handle(&tab_id) else {
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let Some(_info) = self.take_dialog(&tab_id) else {
                     return Ok(CommandOutcome::err(
                         "not_found",
                         format!("tab {tab_id} 没有挂起的弹窗(先 getDialog 确认)"),
                         0,
                     ));
                 };
-                if accept {
-                    handle
-                        .accept(prompt_text.as_deref())
-                        .await
-                        .map_err(|error| format!("接受弹窗失败: {error}"))?;
-                } else {
-                    handle
-                        .dismiss()
-                        .await
-                        .map_err(|error| format!("关闭弹窗失败: {error}"))?;
+                let mut builder = HandleJavaScriptDialogParams::builder().accept(accept);
+                if let Some(prompt) = prompt_text {
+                    builder = builder.prompt_text(prompt);
                 }
+                page.execute(builder.build().unwrap())
+                    .await
+                    .map_err(|error| format!("处置弹窗失败: {error}"))?;
                 drop(guard);
                 self.broadcast(BrowserEvent::DialogClosed { tab_id });
                 Ok(CommandOutcome::ok_value(json!({ "accepted": accept }), 0))
             }
+
             BrowserCommand::ViewportSet {
                 tab_id,
                 width,
                 height,
             } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                page.set_viewport_size(Viewport { width, height })
-                    .await
-                    .map_err(|error| format!("设置视口失败: {error}"))?;
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                page.execute(SetDeviceMetricsOverrideParams::new(
+                    width as i64,
+                    height as i64,
+                    1.0,
+                    false,
+                ))
+                .await
+                .map_err(|error| format!("设置视口失败: {error}"))?;
+                inner.viewports.insert(tab_id, (width, height));
                 Ok(CommandOutcome::ok_value(
                     json!({ "width": width, "height": height }),
                     0,
                 ))
             }
             BrowserCommand::ViewportReset { tab_id } => {
-                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                page.set_viewport_size(Viewport {
-                    width: self.spec.viewport.0,
-                    height: self.spec.viewport.1,
-                })
+                let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
+                let (width, height) = self.spec.viewport;
+                page.execute(SetDeviceMetricsOverrideParams::new(
+                    width as i64,
+                    height as i64,
+                    1.0,
+                    false,
+                ))
                 .await
                 .map_err(|error| format!("重置视口失败: {error}"))?;
+                inner.viewports.remove(&tab_id);
                 Ok(CommandOutcome::ok_value(
-                    json!({ "width": self.spec.viewport.0, "height": self.spec.viewport.1 }),
+                    json!({ "width": width, "height": height }),
                     0,
                 ))
             }
@@ -1399,92 +1417,82 @@ impl BrowserManager {
                 request_id,
                 body_kind,
             } => {
-                let (tab_id, _page) = inner.resolve(tab_id.as_deref())?;
-                let _ = tab_id;
+                let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let kind = body_kind.unwrap_or_else(|| "response".to_string());
                 if kind == "request" {
-                    let post_data = self
-                        .network_entry(request_id.split("-r").next().unwrap_or(""), &request_id)
-                        .and_then(|value| value.get("postData").cloned())
-                        .unwrap_or(Value::Null);
+                    let post_data = match page
+                        .execute(GetRequestPostDataParams::new(request_id.clone()))
+                        .await
+                    {
+                        Ok(response) => Value::String(response.result.post_data),
+                        Err(_) => Value::Null,
+                    };
                     return Ok(CommandOutcome::ok_value(
                         json!({ "requestId": request_id, "body": post_data }),
                         0,
                     ));
                 }
-                // 响应体:取开流时缓存的 Response 句柄直读。
-                let stored = self.bodies.lock().await.get(&request_id).cloned();
-                let Some((response, content_type)) = stored else {
-                    return Ok(CommandOutcome::err(
-                        "not_found",
-                        format!("找不到请求 {request_id} 的响应体(可能已被清理或请求尚未完成)"),
-                        0,
-                    ));
-                };
-                let bytes = response
-                    .body()
-                    .await
-                    .map_err(|error| format!("取响应体失败: {error}"))?;
-                // 文本判定:声明为文本类 content-type,或未知类型但字节是
-                // 合法 UTF-8(嗅探;JSON/HTML/文本都覆盖)。其余按二进制 base64。
-                let lower = content_type.to_lowercase();
-                let is_text = lower.contains("text/")
-                    || lower.contains("json")
-                    || lower.contains("javascript")
-                    || lower.contains("xml")
-                    || lower.contains("x-www-form-urlencoded")
-                    || (lower.is_empty() && std::str::from_utf8(&bytes).is_ok());
-                let (body, base64_encoded) = if is_text {
-                    (
-                        Value::String(String::from_utf8_lossy(&bytes).into_owned()),
-                        false,
-                    )
-                } else {
-                    use base64::Engine;
-                    (
-                        Value::String(base64::engine::general_purpose::STANDARD.encode(&bytes)),
-                        true,
-                    )
-                };
-                Ok(CommandOutcome::ok_value(
-                    json!({
-                        "requestId": request_id,
-                        "body": body,
-                        "base64Encoded": base64_encoded,
-                    }),
+                // 响应体在响应刚发出后的短暂窗口内不可读(CDP 报
+                // "No data found"),~100ms 后就绪;这里带延迟重试,
+                // 覆盖"加载完立刻取 body"的真实使用场景。
+                let mut last_error = String::new();
+                for attempt in 0..4 {
+                    if attempt > 0 {
+                        tokio::time::sleep(Duration::from_millis(120)).await;
+                    }
+                    match page
+                        .execute(GetResponseBodyParams::new(request_id.clone()))
+                        .await
+                    {
+                        Ok(response) => {
+                            return Ok(CommandOutcome::ok_value(
+                                json!({
+                                    "requestId": request_id,
+                                    "body": response.body,
+                                    "base64Encoded": response.base64_encoded,
+                                }),
+                                0,
+                            ));
+                        }
+                        Err(error) => last_error = error.to_string(),
+                    }
+                }
+                Ok(CommandOutcome::err(
+                    "not_found",
+                    format!(
+                        "找不到请求 {request_id} 的响应体(可能已被清理或请求尚未完成): {last_error}"
+                    ),
                     0,
                 ))
             }
             BrowserCommand::StartScreencast { tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                // 幂等:前端在挂载/重连/tabs-changed 时都会调一次,
-                // 而 Playwright 对已开的流会报 "Screencast is already running"。
+                // 幂等:前端在挂载/重连/tabs-changed 时都会调一次。
                 if inner.screencast_tab.as_deref() == Some(tab_id.as_str()) {
                     return Ok(CommandOutcome::ok_value(json!({ "streaming": true }), 0));
                 }
-                // 单实例单画面:切 tab 时先停旧流,否则旧 tab 的帧会继续推给
-                // 前端,画面不跟随切换。
+                // 单实例单画面:切 tab 时先停旧流。
                 if let Some(prev) = inner.screencast_tab.clone()
                     && let Some(prev_page) = inner.pages.get(&prev).cloned()
                 {
-                    let _ = prev_page.screencast().stop().await;
+                    let _ = prev_page.execute(StopScreencastParams::default()).await;
                 }
-                // 帧回调在 wire_page 里一次性注册(见那里的说明);
-                // 这里只负责开流。
-                page.screencast()
-                    .start(ScreencastStartOptions::default().quality(60))
-                    .await
-                    .map_err(|error| format!("开启画面失败: {error}"))?;
+                page.execute(
+                    StartScreencastParams::builder()
+                        .format(StartScreencastFormat::Jpeg)
+                        .quality(60)
+                        .build(),
+                )
+                .await
+                .map_err(|error| format!("开启画面失败: {error}"))?;
                 inner.screencast_tab = Some(tab_id);
-                // 踢一次重绘拿首帧:headless 静态页面没有合成器帧输出,
-                // 开流后不重绘就永远收不到第一帧,面板会一直黑屏。
+                // 踢一次重绘拿首帧(headless 静态页面否则没有合成器帧)。
                 kick_repaint(&page).await;
                 Ok(CommandOutcome::ok_value(json!({ "streaming": true }), 0))
             }
             BrowserCommand::StopScreencast { tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                page.screencast()
-                    .stop()
+                page.execute(StopScreencastParams::default())
                     .await
                     .map_err(|error| format!("停止画面失败: {error}"))?;
                 if inner.screencast_tab.as_deref() == Some(tab_id.as_str()) {
@@ -1496,41 +1504,29 @@ impl BrowserManager {
     }
 }
 
-/// 事件回注句柄(闭包捕获用;与 BrowserManager 解耦避免自引用)。
-#[derive(Clone)]
-struct EventSink {
-    broadcast: broadcast::Sender<BrowserEvent>,
-    dialogs: Arc<std::sync::Mutex<HashMap<String, PendingDialog>>>,
-    network: Arc<std::sync::Mutex<NetworkLog>>,
+/// 把 CDP newtype/枚举安全地转成字符串(与协议原文一致)。
+fn serde_str_id<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
-impl EventSink {
-    fn broadcast(&self, event: BrowserEvent) {
-        let _ = self.broadcast.send(event);
-    }
-
-    fn remember_dialog(&self, tab_id: &str, kind: &str, message: &str, handle: Dialog) {
-        if let Ok(mut map) = self.dialogs.lock() {
-            map.insert(
-                tab_id.to_string(),
-                PendingDialog {
-                    info: json!({ "type": kind, "message": message }),
-                    handle,
-                },
-            );
-        }
-    }
-
-    fn clear_dialog(&self, tab_id: &str) {
-        if let Ok(mut map) = self.dialogs.lock() {
-            map.remove(tab_id);
-        }
-    }
-
-    fn network_record(&self, tab_id: &str, request_id: &str, entry: Value) {
-        if let Ok(mut log) = self.network.lock() {
-            log.record(tab_id, request_id, entry);
-        }
+/// 退出看护:清掉指定代次的会话并广播(幂等;代次不符不动)。
+async fn clear_session_if(
+    slot: &Arc<Mutex<Option<Inner>>>,
+    broadcast: &broadcast::Sender<BrowserEvent>,
+    generation: u64,
+) {
+    let mut guard = slot.lock().await;
+    let same_generation = guard
+        .as_ref()
+        .map(|inner| inner.session.generation == generation)
+        .unwrap_or(false);
+    if same_generation {
+        *guard = None;
+        drop(guard);
+        let _ = broadcast.send(BrowserEvent::Exited);
     }
 }
 
@@ -1552,7 +1548,7 @@ fn error_code(message: &str) -> &'static str {
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -1581,43 +1577,12 @@ async fn wait_dialog_opened(
 /// 这里翻转 documentElement 的 opacity(0.999 ↔ 默认,肉眼不可感知),
 /// 制造一次失效区域。失败静默忽略:重绘只是辅助,不该让开流命令报错。
 async fn kick_repaint(page: &Page) {
-    let _: Option<Value> = page
-        .evaluate(
-            "() => { const el = document.documentElement; \
-             el.style.opacity = el.style.opacity === '0.999' ? '' : '0.999'; }",
-            None::<&()>,
-        )
-        .await
-        .ok();
-}
-
-/// 把工具层的元素引用翻译成 Playwright 选择器。
-///
-/// 快照产出 `[ref=e6]`,模型据此传 `e6`(或带 `@` 前缀的 `@e6`)。
-/// Playwright 官方约定:形如 `e<数字>` 的引用走 `aria-ref` 引擎,
-/// 其余按 CSS/Playwright 定位器原样传递。
-fn normalize_target(target: &str) -> String {
-    let trimmed = target.trim();
-    let bare = trimmed.strip_prefix('@').unwrap_or(trimmed);
-    if is_aria_ref(bare) {
-        return format!("aria-ref={bare}");
-    }
-    trimmed.to_string()
-}
-
-/// 是否是快照产出的元素引用(`e` 后跟纯数字)。
-fn is_aria_ref(target: &str) -> bool {
-    let Some(digits) = target.strip_prefix('e') else {
-        return false;
-    };
-    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-/// 从 ref / locator 里挑一个目标。
-fn pick_target(r#ref: Option<&str>, locator: Option<&str>) -> Option<String> {
-    r#ref
-        .map(normalize_target)
-        .or_else(|| locator.map(|value| value.to_string()))
+    let _ = elements::evaluate(
+        page,
+        "() => { const el = document.documentElement; \
+         el.style.opacity = el.style.opacity === '0.999' ? '' : '0.999'; }",
+    )
+    .await;
 }
 
 /// 解析鼠标按键。
@@ -1629,7 +1594,14 @@ fn parse_button(button: Option<&str>) -> MouseButton {
     }
 }
 
-/// JS 字符串字面量转义(嵌入 wait_for_function 脚本用)。
+/// 从 ref / locator 里挑一个目标(ref 优先)。
+fn pick_target(r#ref: Option<&str>, locator: Option<&str>) -> Option<String> {
+    r#ref
+        .map(elements::normalize_ref)
+        .or_else(|| locator.map(|value| value.to_string()))
+}
+
+/// JS 字符串字面量转义(嵌入轮询脚本用)。
 fn escape_js_string(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('\'', "\\'")
@@ -1637,9 +1609,52 @@ fn escape_js_string(text: &str) -> String {
         .replace('\r', "\\r")
 }
 
-/// 供 `MouseOptions` 复用的构造(避免调用点重复 import)。
-pub fn mouse_options(button: Option<&str>) -> MouseOptions {
-    MouseOptions::builder().button(parse_button(button)).build()
+/// 轮询等待页面 JS 条件为真(50ms 间隔;超时报错)。
+async fn wait_for_condition(page: &Page, script: &str, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match elements::evaluate(page, script).await {
+            Ok(value) if value.as_bool().unwrap_or(false) => return Ok(()),
+            Ok(_) => {}
+            Err(error) => tracing::debug!("等待条件求值失败: {error}"),
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("超时({}ms)", timeout.as_millis()));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// 等待页面完成加载(document.readyState === "complete")。
+/// 超时不报错:回退/前进/刷新后尽力等待,让调用方拿到新的 url。
+async fn wait_for_load(page: &Page, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = elements::evaluate(page, "document.readyState").await.ok();
+        if state.as_ref().and_then(Value::as_str) == Some("complete") {
+            return;
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+impl BrowserManager {
+    /// 从网络日志里找最近一条主文档响应状态(navigate 返回用;拿不到给 null)。
+    fn latest_document_status(&self, tab_id: &str) -> Value {
+        let entries = self.network_list(tab_id, None, 200);
+        entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.get("status").is_some()
+                    && entry.get("resourceType").and_then(Value::as_str) == Some("Document")
+            })
+            .and_then(|entry| entry.get("status").cloned())
+            .unwrap_or(Value::Null)
+    }
 }
 
 /// 默认命令超时。
@@ -1682,46 +1697,22 @@ mod tests {
     }
 
     #[test]
-    fn bare_ref_uses_aria_ref_engine() {
-        // 快照产出 [ref=e6],模型传 e6 —— 必须走 aria-ref 引擎,
-        // 否则会被当作 CSS 选择器(元素不存在 → 超时)。
-        assert_eq!(normalize_target("e6"), "aria-ref=e6");
-        assert_eq!(normalize_target("e123"), "aria-ref=e123");
-    }
-
-    #[test]
-    fn at_prefixed_ref_is_accepted() {
-        assert_eq!(normalize_target("@e6"), "aria-ref=e6");
-        assert_eq!(normalize_target(" @e6 "), "aria-ref=e6");
-    }
-
-    #[test]
-    fn selectors_pass_through_untouched() {
-        assert_eq!(normalize_target("#submit"), "#submit");
-        assert_eq!(normalize_target(".btn.primary"), ".btn.primary");
-        assert_eq!(normalize_target("text=登录"), "text=登录");
-        assert_eq!(
-            normalize_target("getByRole('button')"),
-            "getByRole('button')"
-        );
-    }
-
-    #[test]
-    fn e_prefixed_non_numeric_is_not_a_ref() {
-        // `em` / `entry` 这类是选择器,不能被误判成引用。
-        assert_eq!(normalize_target("em"), "em");
-        assert_eq!(normalize_target("entry-row"), "entry-row");
-        assert_eq!(normalize_target("e"), "e");
-    }
-
-    #[test]
     fn pick_target_prefers_ref_over_locator() {
-        assert_eq!(
-            pick_target(Some("e6"), Some("#x")).as_deref(),
-            Some("aria-ref=e6")
-        );
+        assert_eq!(pick_target(Some("e6"), Some("#x")).as_deref(), Some("e6"));
+        // @ 前缀归一化(快照产出 e6,模型可能带 @ 传)。
+        assert_eq!(pick_target(Some("@e12"), None).as_deref(), Some("e12"));
         assert_eq!(pick_target(None, Some("#x")).as_deref(), Some("#x"));
+        assert_eq!(pick_target(None, Some("text=登录")).as_deref(), Some("text=登录"));
         assert_eq!(pick_target(None, None), None);
+    }
+
+    #[test]
+    fn error_code_classifies_common_failures() {
+        assert_eq!(error_code("导航超时"), "timeout");
+        assert_eq!(error_code("request timeout"), "timeout");
+        assert_eq!(error_code("目标已关闭"), "target_closed");
+        assert_eq!(error_code("元素不存在"), "not_found");
+        assert_eq!(error_code("其它错误"), "command_failed");
     }
 
     #[test]
@@ -1729,5 +1720,14 @@ mod tests {
         assert_eq!(escape_js_string("a'b"), "a\\'b");
         assert_eq!(escape_js_string("a\nb"), "a\\nb");
         assert_eq!(escape_js_string("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn parse_button_maps_known_names() {
+        assert!(matches!(parse_button(None), MouseButton::Left));
+        assert!(matches!(parse_button(Some("left")), MouseButton::Left));
+        assert!(matches!(parse_button(Some("right")), MouseButton::Right));
+        assert!(matches!(parse_button(Some("middle")), MouseButton::Middle));
+        assert!(matches!(parse_button(Some("other")), MouseButton::Left));
     }
 }
