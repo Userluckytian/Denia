@@ -621,7 +621,11 @@
   min-width: 0;
 }
 
-/* ---- 思考强度控件:chip + 滑块浮层(模型选择器右侧独立控件) ---- */
+/* ---- 思考强度控件:chip + 滑块浮层(模型选择器右侧独立控件) ----
+ *
+ * chip 本体只留一枚强度竖线(.effort-meter),颜色即绝对等级;档位名退到
+ * title / aria-label 与浮层里 —— 一眼看颜色,要细节再点开。chip 没有文字后
+ * 命中面积仍靠 min-width 兜住(≥26×28),不随内容塌缩。 */
 
 .effort-control {
   position: relative;
@@ -635,42 +639,19 @@
 .effort-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  min-width: 26px;
   height: 28px;
-  padding: 0 8px;
+  padding: 0 6px;
   border: none;
   border-radius: 999px;
   background: transparent;
-  color: var(--label-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
   cursor: pointer;
 }
 
 .effort-chip:hover:not(:disabled),
 .effort-chip.open {
   background: var(--hover-fill);
-  color: var(--label-primary);
-}
-
-/* 思考关闭:不显示「关」文字,图标降为暗态以示未启用 */
-.effort-chip.off {
-  color: var(--label-tertiary);
-}
-
-.effort-chip.off:hover:not(:disabled),
-.effort-chip.off.open {
-  color: var(--label-primary);
-}
-
-.effort-chip.off .effort-chip-icon {
-  color: var(--label-caption);
-}
-
-.effort-chip.off:hover:not(:disabled) .effort-chip-icon,
-.effort-chip.off.open .effort-chip-icon {
-  color: var(--label-primary);
 }
 
 .effort-chip:disabled {
@@ -682,41 +663,38 @@
 .effort-chip-static {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  min-width: 26px;
   height: 28px;
-  padding: 0 8px;
-  color: var(--label-tertiary);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
+  padding: 0 6px;
   cursor: default;
   user-select: none;
 }
 
-.effort-chip-static .effort-chip-icon {
-  display: inline-flex;
-  color: var(--label-caption);
+/* 强度竖线:3px 宽、13px 高、圆角 2px ——「略粗但不算粗」。
+   颜色按**绝对等级**映射(不是模型内相对索引),同一档位跨模型同色:
+   0 灰(关闭)、1 蓝、2 青、3 琥珀、4 橙、5 紫→品红渐变(呼应浮层 max 档)。
+   色值在深浅两套主题下都保持可辨识;max 档刻意不带动画。 */
+.effort-meter {
+  display: inline-block;
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--label-tertiary);
+  transition: filter 0.12s var(--ease);
 }
 
-.effort-chip-static .effort-chip-label {
-  color: var(--label-tertiary);
-}
+.effort-meter[data-rank='0'] { background: var(--label-tertiary); }
+.effort-meter[data-rank='1'] { background: #4d9dfd; }
+.effort-meter[data-rank='2'] { background: #2fb8a6; }
+.effort-meter[data-rank='3'] { background: #e0a527; }
+.effort-meter[data-rank='4'] { background: #eb7f36; }
+.effort-meter[data-rank='5'] { background: linear-gradient(180deg, #8b5cf6, #d946ef); }
 
-.effort-chip-icon {
-  display: inline-flex;
-  color: var(--label-tertiary);
-}
-
-.effort-chip:hover:not(:disabled) .effort-chip-icon,
-.effort-chip.open .effort-chip-icon {
-  color: var(--label-primary);
-}
-
-.effort-chip-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
+/* 悬停/展开只把竖线提亮一档,克制到刚好提示「可点」。 */
+.effort-chip:hover:not(:disabled) .effort-meter,
+.effort-chip.open .effort-meter {
+  filter: brightness(1.15);
 }
 
 /* ---- 模型选择器:单面板(搜索优先) ----

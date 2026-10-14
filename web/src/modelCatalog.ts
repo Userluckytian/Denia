@@ -50,6 +50,12 @@ const REASONING_EFFORT_RANK: Record<ReasoningEffortId, number> = {
   max: 5,
 }
 
+/** 档位的绝对强度等级(off=0 … max=5);未知 id 按最低级处理。
+ *  用于跨模型一致的语义映射(如强度竖线的颜色),不能用模型内的相对索引。 */
+export function reasoningEffortRank(id: string): number {
+  return isReasoningEffortId(id) ? REASONING_EFFORT_RANK[id] : 0
+}
+
 /** 开启思考后的默认档位:仅「关」(思考但不选强度)。 */
 export function defaultReasoningEfforts(): ReasoningEffortId[] {
   return [REASONING_EFFORT_OFF]

@@ -2,10 +2,10 @@ import { useEffect, useId, useRef, useState, type CSSProperties } from 'react'
 import * as Slider from '@radix-ui/react-slider'
 import { AnimatePresence, animate, motion, useMotionValue, useReducedMotion, useTransform } from 'motion/react'
 import { t } from '../i18n'
-import { REASONING_EFFORT_OFF } from '../modelCatalog'
+import { REASONING_EFFORT_OFF, reasoningEffortRank } from '../modelCatalog'
 import { reasoningEffortLabel } from '../reasoningEffort'
+import { useClampedPopover } from '../hooks/useClampedPopover'
 import type { ReasoningEffortInfo } from '../types'
-import { IconThink } from './icons'
 import { EffortMaxFill } from './EffortMaxFill'
 
 const BURST_POINTS = [
@@ -29,6 +29,9 @@ export function ComposerEffortControl({ efforts, value, disabled, onChange }: {
   const [burst, setBurst] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const chipRef = useRef<HTMLButtonElement>(null)
+  // 浮层夹取:分屏窗格窄时,贴 chip 展开的浮层会被窗格裁掉(见 hook 注释)。
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const popoverStyle = useClampedPopover({ anchorRef: rootRef, popoverRef, open, align: 'left' })
   const thumbRef = useRef<HTMLSpanElement>(null)
   const draftRef = useRef(value)
   const dragStartRef = useRef(value)
@@ -44,6 +47,8 @@ export function ComposerEffortControl({ efforts, value, disabled, onChange }: {
   const off = shown?.id === REASONING_EFFORT_OFF
   const atMax = maxIndex > 0 && index === maxIndex && !off
   const label = reasoningEffortLabel(shown?.id ?? value)
+  // 竖线颜色按绝对强度等级映射(off=0 … max=5),跨模型的同一档位颜色一致。
+  const rank = reasoningEffortRank(shown?.id ?? value)
   const description = shown?.description?.trim()
   const effortIds = efforts.map((effort) => effort.id).join('\0')
   const percentage = maxIndex > 0 ? index / maxIndex * 100 : 0
@@ -135,8 +140,7 @@ export function ComposerEffortControl({ efforts, value, disabled, onChange }: {
   if (maxIndex === 0) {
     return <div className="effort-control">
       <span className={`effort-chip-static${off ? ' off' : ''}`} title={off ? t('effortControlOffHint') : label}>
-        <span className="effort-chip-icon" aria-hidden="true"><IconThink size={12} /></span>
-        {!off && <span className="effort-chip-label">{label}</span>}
+        <span className="effort-meter" data-rank={rank} aria-hidden="true" />
       </span>
     </div>
   }
@@ -166,12 +170,11 @@ export function ComposerEffortControl({ efforts, value, disabled, onChange }: {
           setOpen(true)
         }}
       >
-        <span className="effort-chip-icon" aria-hidden="true"><IconThink size={12} /></span>
-        {!off && <span className="effort-chip-label">{label}</span>}
+        <span className="effort-meter" data-rank={rank} aria-hidden="true" />
       </button>
       {open && <>
         <div className="menu-backdrop" onClick={() => close(true)} />
-        <div className="effort-popover" id={dialogId} role="dialog" aria-label={t('effortControlHint')}>
+        <div className="effort-popover" id={dialogId} role="dialog" aria-label={t('effortControlHint')} ref={popoverRef} style={popoverStyle}>
           <div className="effort-popover-head">
             <span className="effort-popover-value">{label}</span>
             <span className="effort-popover-title">{t('reasoningLabel')}</span>

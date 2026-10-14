@@ -147,7 +147,6 @@
 
   /* chip 内文案统一省略号截断,保证任何一个 chip 都不会撑破行宽。 */
   .permission-chip-name,
-  .effort-chip-label,
   .model-chip-label {
     min-width: 0;
     overflow: hidden;
@@ -481,6 +480,9 @@
 .prompt-bar .model-chip,
 .prompt-bar .effort-chip,
 .prompt-bar .effort-chip-static { min-height: 32px; border-radius: 999px; }
+/* 强度 chip 没有文字,靠 min-width 把命中面积留在 32×32(与同排的优化按钮一致)。 */
+.prompt-bar .effort-chip,
+.prompt-bar .effort-chip-static { min-width: 32px; }
 /* 添加文件:常驻一块浅灰底 —— 它是"写之前"的第一个动作,不该像 chip 那样
    隐身(hover 才显形)。悬停再抬一档。28px 与同排 opt 钮同高,不抢发送键。 */
 .composer-add-btn.icon-btn {
@@ -539,6 +541,8 @@
   .prompt-bar .model-chip,
   .prompt-bar .effort-chip,
   .prompt-bar .effort-chip-static { min-height: 40px; }
+  .prompt-bar .effort-chip,
+  .prompt-bar .effort-chip-static { min-width: 40px; }
   .prompt-bar .cm-trigger { width: 40px; height: 40px; }
   .composer-image-remove { opacity: 1; }
 }
@@ -561,4 +565,87 @@
 @media (prefers-reduced-motion: reduce) {
   .prompt-panel,
   .prompt-bar .btn-send { transition: none; }
+}
+
+/* ---------- 输入区:容器窄(分屏窗格)——数据属性,不用媒体查询 ----------
+ *
+ * 分工:@media (max-width: 820px) 回答「**视口**小」(手机);本段回答
+ * 「视口宽、但输入框所在容器窄」——典型是会话分屏(视口 1400px,单个
+ * 窗格 640px)。SessionsPage 用 ResizeObserver 在 .session-layout 上打
+ * 属性:容器 < 720px 时 [data-compact],< 560px 时再叠加 [data-tight]。
+ * 不用 CSS 容器查询:@container 的 layout containment 会改变依赖视口
+ * 定位的浮层(模型/思考/权限菜单)的 fixed 包含块,反而弄坏它们。
+ *
+ * 层叠:这两段在所有 820px 段之后、特异性更高(.session-layout + [data-*] +
+ * 目标选择器,高于 820 段里的单类选择器),手机同时命中三者时以
+ * [data-tight] 为准(它写在 compact 之后)—— 数值取自 820 段,不互相打架;
+ * 桌面窄窗格只命中 [data-compact],保持桌面尺寸,不做触摸目标放大。 */
+
+/* 紧凑:把「一整条不收缩的发送链」改成「模型组可收缩、其余控件不缩」。
+   基础样式的 .composer-right{flex:none} 在窄容器里会把模型名连同整条
+   链路一起顶出卡片,这里允许整组收缩,收缩量全部由模型组吸收。 */
+.session-layout[data-compact] .composer-right {
+  --composer-control-gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* 模型组是唯一的可伸缩段:名字长了就由内部的 ellipsis 截断。 */
+.session-layout[data-compact] .composer-model-group,
+.session-layout[data-compact] .composer-model-group .model-menu-anchor {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* 260px 的上限按整窗宽度估算,窗格窄时它会把发送链挤出去;收紧到 200px,
+   让 .model-chip-label 的省略号先于其它控件生效。 */
+.session-layout[data-compact] .composer-model-group .model-chip {
+  max-width: 200px;
+}
+
+/* 固定尺寸控件不参与收缩:发送键被压扁或挤出卡片是最不能接受的降级。 */
+.session-layout[data-compact] .composer-opt-btn,
+.session-layout[data-compact] .cm-root,
+.session-layout[data-compact] .btn-send,
+.session-layout[data-compact] .composer-model-group .effort-control {
+  flex: none;
+}
+
+/* 左组同样兜底:权限 chip 的名字允许省略,避免把行宽撑破。 */
+.session-layout[data-compact] .permission-selector { min-width: 0; }
+.session-layout[data-compact] .permission-chip { min-width: 0; max-width: 100%; }
+.session-layout[data-compact] .permission-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 只收「公共轴」变量:编辑区文字与控件架一起收 2px,两者仍然同轴。 */
+.session-layout[data-compact] .prompt-panel {
+  --composer-inset: 8px;
+}
+
+/* 极窄:与 820px 断点同样的两行布局 —— 左组(+ / 权限)一行,发送链整条
+   换到第二行靠右;模型组吃满剩余宽度,发送键永远留在卡片内。 */
+.session-layout[data-tight] .composer-left {
+  flex: 1 1 auto;
+}
+
+.session-layout[data-tight] .composer-right {
+  flex: 1 1 100%;
+  justify-content: flex-end;
+}
+
+.session-layout[data-tight] .composer-model-group {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.session-layout[data-tight] .composer-model-group .model-menu-anchor {
+  flex: 1 1 auto;
+}
+
+.session-layout[data-tight] .composer-model-group .model-chip {
+  max-width: 100%;
 }

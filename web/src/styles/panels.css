@@ -28,6 +28,171 @@
   color: var(--label-primary);
 }
 
+/* ---------- 会话分屏(拖动侧栏会话到会话区) ----------
+ * 两个窗格左右并排:.split-view 是 flex 容器,左窗格宽度由 --split-left
+ * 驱动 —— 拖动分隔条时由 JS 直接改这个变量(DOM),松手才落 state:两个
+ * 会话子树都很大,每帧 setState 会把整页重渲染。副窗格在左还是在右由
+ * DOM 顺序决定,不靠 order,免得焦点序列与视觉顺序错位。
+ */
+
+.main-row .page-pane {
+  position: relative;
+}
+
+/* 分屏时右侧面板**完全禁止出现**:不只是折叠(宽度归零但边框仍占 1px、
+   收起过程有 260ms 动画,期间仍看得见),而是从布局与绘制里整个拿掉。
+   注意仍**不卸载 DOM** —— 终端/浏览器实例要保活,退出分屏后原样回来;
+   恢复时的展开态由 pane.collapsed 决定(App 传入的 collapsed 逻辑不变)。 */
+.main-row[data-split] .side-pane {
+  display: none;
+}
+
+.split-view {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  --split-left: 50%;
+}
+
+.split-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+
+.split-pane.left {
+  flex: 0 0 var(--split-left);
+}
+
+.split-pane.right {
+  flex: 1 1 auto;
+}
+
+/* 焦点窗格:顶部一条短蓝线(与思考强度控件同源色),指明侧栏点击
+ * 与拖放替换会落到哪边。未分屏时不渲染。 */
+.split-pane[data-focus='true']::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 6;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, #0285ffb3 18%, #0285ffb3 82%, transparent);
+}
+
+/* 非焦点窗格:标题降一档对比(参考 VSCode 非活动编辑器组的做法)。 */
+.split-pane[data-focus='false'] .session-title {
+  color: var(--label-secondary);
+}
+
+/* 拖动调宽期间:两个窗格内容不接管指针(避免途经悬停态抖动、
+ * 也保证全局保持 col-resize 光标),松手即恢复。 */
+.split-view.dragging {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.split-view.dragging .split-pane {
+  pointer-events: none;
+}
+
+/* 分隔条:视觉一条 1px 线,命中区 7px(向两侧各借 3px)。 */
+.split-divider {
+  position: relative;
+  flex: 0 0 auto;
+  width: 7px;
+  margin-inline: -3px;
+  z-index: 4;
+  display: flex;
+  justify-content: center;
+}
+
+.split-divider::before {
+  content: '';
+  width: 1px;
+  height: 100%;
+  background: var(--border-l1);
+  transition: background 0.15s var(--ease), width 0.15s var(--ease);
+}
+
+.split-divider:hover::before,
+.split-view.dragging .split-divider::before {
+  width: 2px;
+  background: var(--border-l3);
+}
+
+.split-divider-grip {
+  position: absolute;
+  inset: 0;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+/* 退出分屏:贴分隔条顶部(与会话头部同高)。默认隐身但不占可点区,
+ * 悬停/聚焦时现身 —— 不挡住拖动热区的中央。 */
+.split-divider-exit {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  translate: -50% 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border-l2);
+  border-radius: 999px;
+  background: var(--bg-layer-2);
+  color: var(--label-tertiary);
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.split-divider:hover .split-divider-exit,
+.split-divider:focus-within .split-divider-exit {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.split-divider-exit:hover {
+  color: var(--label-primary);
+}
+
+/* 拖动会话经过会话区:半透明遮罩标出落点(左右半区)。 */
+.split-drop-hint {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  z-index: 8;
+  pointer-events: none;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--border-l3);
+}
+
+.split-drop-hint.left {
+  left: 0;
+}
+
+.split-drop-hint.right {
+  right: 0;
+}
+
+/* 分屏副窗格里的会话行:弱高亮 —— 它也在屏上(另一个窗格),但不与
+ * 主窗格的 active 抢同一档对比。 */
+.session-row-wrap.secondary-active {
+  background: color-mix(in srgb, var(--active-fill) 62%, var(--hover-fill));
+}
+
 
 
 

@@ -16,6 +16,14 @@ import { t } from '../i18n'
 
 /** 少于这么多条用户消息时整条轨道不渲染。 */
 const MIN_ITEMS = 4
+/**
+ * 轨道与正文互不重叠所需的「内容列左缘」最小净距(px)。
+ *
+ * 轨道固定在滚动口左侧 [16, 52]px(.axis-rail 的 left:16px + .axis-mark 的
+ * width:36px),正文从内容列左缘再内缩 16px(--composer-side-clearance)开始;
+ * 要求正文与轨道留 8px 净空 ⇒ 列左缘 ≥ 52 + 8 - 16 = 44。
+ * (改轴或内容列的尺寸时要同步这里。) */
+const MIN_COLUMN_CLEARANCE_PX = 44
 /** 预览延迟:指针停住才拉卡片,划过时不闪。 */
 const PREVIEW_DELAY_MS = 150
 /** 拖动/翻页后的定位校正窗口。 */
@@ -249,6 +257,30 @@ export function ConversationAxis({
     if (active >= 0 && scrub < 0) revealMark(active)
   }, [active, revealMark, scrub])
 
+  /**
+   * 拥挤判定:消息文本能挨到轨道时(内容列左缘净距不足),整条收起 ——
+   * 宁可没有导航,也不让轨道叠在文字上。窄窗格(分屏)下内容列恒为满宽、
+   * 列左缘为 0,必然拥挤;把窗口拉宽又会自动回来。
+   */
+  const [cramped, setCramped] = useState(false)
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller) return
+    const measure = () => {
+      const column = scroller.querySelector('.conversation-view')
+      if (!column) return
+      const clearance =
+        column.getBoundingClientRect().left - scroller.getBoundingClientRect().left
+      setCramped(clearance < MIN_COLUMN_CLEARANCE_PX)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(scroller)
+    const column = scroller.querySelector('.conversation-view')
+    if (column) observer.observe(column)
+    return () => observer.disconnect()
+  }, [scrollRef])
+
   const focusIndex = scrub >= 0 ? scrub : hover
   const shownIndex = open ? (focusIndex >= 0 ? focusIndex : active) : -1
 
@@ -364,7 +396,7 @@ export function ConversationAxis({
     return () => document.removeEventListener('keydown', onKey)
   }, [indexBySeq, items, locate, scrollRef])
 
-  if (items.length < MIN_ITEMS) return null
+  if (items.length < MIN_ITEMS || cramped) return null
 
   const previewIndex = shownIndex
   const previewItem = previewIndex >= 0 ? items[previewIndex] : undefined

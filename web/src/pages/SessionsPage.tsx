@@ -61,6 +61,8 @@ export default function SessionsPage({
   onAddWorkspace,
   sidePaneOpen = false,
   onToggleSidePane,
+  secondary = false,
+  navigate,
 }: {
   activeId: string | null
   locked: boolean
@@ -72,10 +74,20 @@ export default function SessionsPage({
   sidePaneOpen?: boolean
   /** 切换右侧面板。 */
   onToggleSidePane?: () => void
+  /** 分屏副窗格:不渲染工作区选择这类会触发全局动作的入口。 */
+  secondary?: boolean
+  /**
+   * 组件内切换会话的出口。默认切全局 activeId;分屏副窗格由 App 注入,
+   * 把切换(回退重挂/fork/会话消失)约束在本窗格内。
+   */
+  navigate?: (id: string | null, wsId?: string | null) => void
 }) {
   const sessions = useSessions()
   const workspaces = useWorkspaces()
   const catalogTick = useCatalogTick()
+  // 切换会话的统一出口:主窗格走全局 activeId,分屏副窗格由 App 注入
+  // navigate 把切换约束在本窗格内(窗格语义见 splitView.ts)。
+  const go = navigate ?? setActiveId
   const activeSession: SessionSummary | null = activeId
     ? (sessions.find((s) => s.id === activeId) ?? null)
     : null
@@ -919,6 +931,24 @@ export default function SessionsPage({
     syncPromptHeight()
   }, [prompt, phase])
 
+  /* ---- 布局宽度档位(窄容器响应) ----
+   * 视口媒体查询覆盖不到"视口宽、容器窄"的场景(分屏两窗格、主列被面板
+   * 挤窄)。这里量的是布局自身的宽度,写进 data 属性,由 CSS 让输入区
+   * 提前进入紧凑/两行布局,而不是等视口断点。 */
+  const [layoutFit, setLayoutFit] = useState<'wide' | 'compact' | 'tight'>('wide')
+  useEffect(() => {
+    const el = layoutRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const measure = () => {
+      const width = el.getBoundingClientRect().width
+      setLayoutFit(width < 560 ? 'tight' : width < 720 ? 'compact' : 'wide')
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
   /* ---- 输入框自动聚焦 ----
    * 进入欢迎态/切换会话后,只要输入框可编辑就自动获得焦点,用户不必先点一下
    * 才能打字。三类情况不抢:输入框不可编辑(inert/优化中)、有弹窗在等用户
@@ -1069,7 +1099,7 @@ export default function SessionsPage({
         const { session } = await api.forkSession(activeId, seq)
         // 子会话挂同一工作区(dsh:fork 后立即 open 子会话)。
         addSessionLocal({ ...session, cwd_alive: true }, activeWs?.id)
-        setActiveId(session.id, activeWs?.id ?? null)
+        go(session.id, activeWs?.id ?? null)
         void refreshList()
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
@@ -1077,7 +1107,7 @@ export default function SessionsPage({
         forkBusyRef.current = false
       }
     },
-    [activeId, activeWs],
+    [activeId, activeWs, go],
   )
 
   /* ---- 轨迹引用:芯片挂到输入框上方,随消息注入(与粘贴图片一致) ---- */
@@ -1148,9 +1178,10 @@ export default function SessionsPage({
   }, [activeId, refreshGoal])
 
   const handleNotFound = useCallback(() => {
-    // 会话已被删除(其他窗口/流 404):清空视图。
-    setActiveId(null, null)
-  }, [])
+    // 会话已被删除(其他窗口/流 404):清空视图。分屏副窗格由 App 的
+    // navigate 实现退到单窗格,而不是清掉主会话。
+    go(null, null)
+  }, [go])
 
   /* ---- 导出会话:从后端拉全量 events 后回放文件 ---- */
 
@@ -1557,7 +1588,7 @@ export default function SessionsPage({
             await flushComposer()
           }
           if (composerScope) await saveComposer(composerScope, empty)
-          if (mountedRef.current) setActiveId(createdId, activeWs?.id)
+          if (mountedRef.current) go(createdId, activeWs?.id)
         } catch (error) { notify('err', String(error)) }
       } else if (ok && options?.clearInput !== false && !mountedRef.current && composerScope) {
         await saveComposer(composerScope, { ...composerSnapshotRef.current, text: '', images: [], attachments: [], quotes: [] })
@@ -2214,7 +2245,13 @@ export default function SessionsPage({
   )
 
   return (
-    <div className="session-layout" data-phase={phase} ref={layoutRef}>
+    <div
+      className="session-layout"
+      data-phase={phase}
+      ref={layoutRef}
+      data-compact={layoutFit !== 'wide' || undefined}
+      data-tight={layoutFit === 'tight' || undefined}
+    >
       {phase === 'active' && (
         <header className="session-header">
           {/* 标题块:标题与组装标签同处一块,标签紧贴标题文字。
@@ -2378,7 +2415,7 @@ export default function SessionsPage({
         {(phase === 'hero' || view === 'chat') && (
           <div className="composer-seat" ref={seatRef} data-composer-seat="">
             <div className={`composer-stack${phase === 'hero' ? ' composer-hero' : ''}`}>
-              {phase === 'hero' && workspaceRow}
+              {phase === 'hero' && !secondary && workspaceRow}
               {phase === 'active' && (
                 <QueuedMessagePanel
                   messages={queuedMessages}
@@ -2405,7 +2442,7 @@ export default function SessionsPage({
                   onDecision={handlePlanDecision}
                   onExit={handlePlanExit}
                 />
-              ) : activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><small className="runtime-child-snapshot" data-testid="child-snapshot" title={descriptorText}>{descriptorText}</small><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
+              ) : activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><small className="runtime-child-snapshot" data-testid="child-snapshot" title={descriptorText}>{descriptorText}</small><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && go(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
               {phase === 'active' && (
                 <StatsBar nodes={transcriptNodes} totals={sessionTotals} openTurnStartedAt={openTurnAt} />
               )}

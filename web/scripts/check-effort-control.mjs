@@ -16,6 +16,13 @@ await build({
   external: ['react', 'react-dom', 'react/jsx-runtime', '@radix-ui/react-slider', 'motion/react'],
   logLevel: 'silent',
 })
+// 竖线颜色映射依赖 modelCatalog 的绝对等级,单独打一份做纯函数断言。
+const catalogBundle = join(outDir, 'effort-catalog.mjs')
+await build({
+  entryPoints: [join(web, 'src/modelCatalog.ts')],
+  outfile: catalogBundle, bundle: true, format: 'esm', platform: 'node',
+  logLevel: 'silent',
+})
 const dom = new JSDOM('<body><div id="root"></div><button id="outside">Outside</button></body>', {
   url: 'http://localhost/', pretendToBeVisual: true,
 })
@@ -30,6 +37,7 @@ const React = await import('react')
 const { act } = React
 const { createRoot } = await import('react-dom/client')
 const { ComposerEffortControl } = await import(pathToFileURL(bundle).href)
+const { reasoningEffortRank } = await import(pathToFileURL(catalogBundle).href)
 const root = createRoot(w.document.getElementById('root'))
 const calls = []
 let patch
@@ -51,10 +59,28 @@ const dispatch = async (node, event) => {
 const click = (selector) => dispatch(query(selector), new w.MouseEvent('click', { bubbles: true }))
 const key = (name) => dispatch(query('[role="slider"]'), new w.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }))
 const sliderValue = () => query('[role="slider"]')?.getAttribute('aria-valuenow')
+const meterRank = (selector) => query(selector)?.getAttribute('data-rank')
 const check = (name, fn) => { fn(); console.log(`ok   ${name}`) }
+
+check('reasoningEffortRank maps each id to its absolute level', () => {
+  assert.equal(reasoningEffortRank('off'), 0)
+  assert.equal(reasoningEffortRank('low'), 1)
+  assert.equal(reasoningEffortRank('medium'), 2)
+  assert.equal(reasoningEffortRank('high'), 3)
+  assert.equal(reasoningEffortRank('xhigh'), 4)
+  assert.equal(reasoningEffortRank('max'), 5)
+  assert.equal(reasoningEffortRank('unknown-effort'), 0)
+})
 
 try {
   await act(async () => root.render(React.createElement(Harness)))
+  check('trigger shows one meter whose rank matches the current effort', () => {
+    assert(meterRank('.effort-chip .effort-meter'), 'meter missing on the effort trigger')
+    assert.equal(meterRank('.effort-chip .effort-meter'), '2')
+    // 可见内容只剩竖线:文字与图标都不再出现在 chip 里(档位名走 aria/title)。
+    assert.equal(query('.effort-chip').textContent.trim(), '')
+    assert.equal(query('.effort-chip svg'), null)
+  })
   await click('.effort-chip')
   check('open focuses the configured discrete effort', () => {
     assert.equal(sliderValue(), '2')
@@ -64,6 +90,9 @@ try {
   check('arrow adjustment previews without changing the parent', () => {
     assert.equal(sliderValue(), '3')
     assert.deepEqual(calls, [])
+  })
+  check('previewing recolors the trigger meter before commit', () => {
+    assert.equal(meterRank('.effort-chip .effort-meter'), '3')
   })
   await key('Enter')
   check('Enter commits exactly once and restores trigger focus', () => {
@@ -90,6 +119,9 @@ try {
   await key('Home')
   await key('Enter')
   check('off remains selectable and is submitted as off', () => assert.equal(calls.at(-1), 'off'))
+  check('off draws the lowest rank on the meter', () => {
+    assert.equal(meterRank('.effort-chip .effort-meter'), '0')
+  })
   await click('.effort-chip')
   await key('End')
   await act(async () => patch({ disabled: true }))
@@ -114,6 +146,11 @@ try {
   check('a one-level model has no editable slider', () => {
     assert.equal(query('.effort-chip'), null)
     assert(query('.effort-chip-static'))
+  })
+  check('the static single-level chip also draws a meter', () => {
+    assert(meterRank('.effort-chip-static .effort-meter'), 'meter missing on the static chip')
+    assert.equal(meterRank('.effort-chip-static .effort-meter'), '0')
+    assert.equal(query('.effort-chip-static').textContent.trim(), '')
   })
 } finally {
   await act(async () => root.unmount())

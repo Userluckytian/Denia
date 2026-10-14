@@ -50,6 +50,22 @@ import { dropScope, peekSidePane } from './sidePaneStore'
 import { useModelSelection } from './modelSelectionStore'
 import type { SidePaneTab } from './sidePane'
 import {
+  SESSION_DRAG_MIME,
+  SPLIT_MAX_RATIO,
+  SPLIT_MIN_RATIO,
+  clampSplitRatio,
+  dropSessionOnSide,
+  openSessionInView,
+  ratioFromPointer,
+  readSplitRatio,
+  reconcileSplit,
+  writeSplitRatio,
+  type PaneSlot,
+  type SplitSide,
+  type SplitState,
+  type SplitView,
+} from './splitView'
+import {
   IconCaretRight,
   IconClose,
   IconCollapseAll,
@@ -516,10 +532,16 @@ export default function App() {
     [startedIds],
   )
 
-  // 首条消息后(或已有历史)会话与工作区绑定,不能换。
-  const locked =
-    activeSession !== null &&
-    (!!startedIds[activeSession.id] || !isBlank(activeSession))
+  // 首条消息后(或已有历史)会话与工作区绑定,不能换。分屏副窗格按它
+  // 自己的会话判定(不能借用主会话的状态)。
+  const lockedFor = useCallback(
+    (id: string) => {
+      const session = sessions.find((s) => s.id === id)
+      return session !== null && session !== undefined && (!!startedIds[session.id] || !isBlank(session))
+    },
+    [sessions, startedIds, isBlank],
+  )
+  const locked = activeSession !== null && lockedFor(activeSession.id)
 
   const focusSession = useCallback((sessionId: string, wsId?: string) => {
     setActiveId(sessionId, wsId ?? null)
@@ -630,6 +652,8 @@ export default function App() {
         // 登记为本页面创建的空白会话:只有它允许被本页面的"切走即删"清理。
         markLocalBlank(summary.id)
         setActiveId(summary.id, target.id)
+        // 分屏保持:新会话落在主窗格,注意力跟过去。
+        setSplit((prev) => (prev ? { ...prev, focus: 'primary' } : prev))
         void refreshList()
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
@@ -751,16 +775,244 @@ export default function App() {
     [runningIds, cleanupSessionPane],
   )
 
+  /* ---- 分屏:拖动侧栏会话到会话窗口 ---- */
+
+  // 副窗格会话与它相对主窗格的位置;null = 单窗格。侧栏高亮、URL、右侧
+  // 面板仍只看 activeId(主窗格),副窗格是"参考视图"。
+  const [split, setSplit] = useState<SplitState | null>(null)
+  const [splitRatio, setSplitRatio] = useState(() => readSplitRatio())
+  // 会话拖入时的落点提示(left/right),松开或离开即清除。
+  const [dragHint, setDragHint] = useState<SplitSide | null>(null)
+  const splitViewRef = useRef<HTMLDivElement | null>(null)
+  const splitDragRef = useRef<number | null>(null)
+  const liveSplitRatioRef = useRef(splitRatio)
+
+  const splitActive = split !== null && activeId !== null
+
+  // 窗格里的会话不存在了(被删除/被其他实例删掉)就退回单窗格:
+  // 留一个指向空气的窗格只会让人以为会话还在。
+  useEffect(() => {
+    if (!split || !sessionsLoaded) return
+    const alive = new Set(sessions.map((s) => s.id))
+    setSplit((prev) =>
+      prev
+        ? reconcileSplit({ primaryId: activeId, split: prev }, (id) => alive.has(id)).split
+        : prev,
+    )
+  }, [split, sessions, sessionsLoaded, activeId])
+
+  // 手机屏放不下两个会话;扩展页占满主列。两者与分屏互斥。
+  useEffect(() => {
+    if (isMobile || extensionTab) setSplit(null)
+  }, [isMobile, extensionTab])
+
+  // 拖拽在窗口外松开时没有 drop 事件:靠 dragend 兜底清掉落点提示。
+  useEffect(() => {
+    const clear = () => setDragHint(null)
+    window.addEventListener('dragend', clear)
+    return () => window.removeEventListener('dragend', clear)
+  }, [])
+
+  /**
+   * 把一次"打开会话"的结果套到全局状态上。
+   * 主窗格会话变化走 setActiveId,副窗格变化只落在 split 上。
+   */
+  const applySplitView = useCallback(
+    (next: SplitView, wsId?: string | null) => {
+      if (next.primaryId !== null && next.primaryId !== activeId) {
+        setActiveId(next.primaryId, wsId ?? null)
+      }
+      setSplit(next.split)
+    },
+    [activeId],
+  )
+
+  /** 会话所属工作区 id(drop 时与会话头一致地更新 pendingWsId)。 */
+  const workspaceIdForSession = useCallback(
+    (id: string): string | null => {
+      const session = sessions.find((s) => s.id === id)
+      if (!session) return null
+      return workspaces.find((w) => w.path === session.cwd)?.id ?? null
+    },
+    [sessions, workspaces],
+  )
+
+  /** 指针落在容器的哪一侧(拖放落点)。 */
+  const sideFromPointer = (event: React.DragEvent<HTMLElement>): SplitSide => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    return event.clientX - rect.left < rect.width / 2 ? 'left' : 'right'
+  }
+
+  /** 拖动自家侧栏的会话经过会话区:亮出落点提示。 */
+  const onPaneDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes(SESSION_DRAG_MIME)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+    setDragHint(sideFromPointer(event))
+  }
+
+  const onPaneDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    const to = event.relatedTarget as Node | null
+    if (to && event.currentTarget.contains(to)) return
+    setDragHint(null)
+  }
+
+  /** 松开:会话落到拖入的那一侧(已在屏上的会话则互换窗格)。 */
+  const onPaneDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    const id = event.dataTransfer.getData(SESSION_DRAG_MIME)
+    setDragHint(null)
+    // 不是自家会话(文件/文本)不接管。
+    if (!id) return
+    event.preventDefault()
+    const next = dropSessionOnSide({ primaryId: activeId, split }, id, sideFromPointer(event))
+    applySplitView(next, workspaceIdForSession(id))
+  }
+
+  /* 分隔条:拖动调宽 + 退出分屏。 */
+
+  const beginSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    splitDragRef.current = event.pointerId
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      /* 合成/已失效的指针:没有 capture 也能靠 grip 上的 move 拖动 */
+    }
+    splitViewRef.current?.classList.add('dragging')
+  }
+
+  const moveSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const host = splitViewRef.current
+    if (splitDragRef.current === null || !host) return
+    const rect = host.getBoundingClientRect()
+    const ratio = ratioFromPointer(event.clientX, rect.left, rect.width)
+    // 拖动期间直接改 DOM 变量、不落 state:两个会话子树都很大,每帧
+    // setState 会把整页重渲染;松手时一次性落库。
+    liveSplitRatioRef.current = ratio
+    host.style.setProperty('--split-left', `${ratio * 100}%`)
+  }
+
+  const endSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (splitDragRef.current === null) return
+    splitDragRef.current = null
+    splitViewRef.current?.classList.remove('dragging')
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    } catch {
+      /* 指针已释放:忽略 */
+    }
+    setSplitRatio(liveSplitRatioRef.current)
+    writeSplitRatio(liveSplitRatioRef.current)
+  }
+
+  const keySplitDrag = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const step = event.shiftKey ? 0.1 : 0.03
+    const ratio = clampSplitRatio(splitRatio + (event.key === 'ArrowLeft' ? -step : step))
+    setSplitRatio(ratio)
+    writeSplitRatio(ratio)
+  }
+
+  /** 点击窗格把焦点移过去:侧栏点击与拖放的落点都以焦点窗格为准。 */
+  const focusPane = useCallback((slot: PaneSlot) => {
+    setSplit((prev) => {
+      if (!prev || prev.focus === slot) return prev
+      return { ...prev, focus: slot }
+    })
+  }, [])
+
+  /** 副窗格的会话切换出口:约束在副窗格;会话消失就退回单窗格。 */
+  const navigateSecondary = useCallback((id: string | null) => {
+    setSplit((prev) => {
+      if (!prev) return prev
+      if (id === null) return null
+      return { ...prev, secondaryId: id, focus: 'secondary' }
+    })
+  }, [])
+
   const openSession = useCallback(
     (id: string, wsId?: string) => {
       setExtensionTab(null)
-      setActiveId(id, wsId ?? null)
       // 手机上选中会话后自动收起抽屉 —— 否则用户点完还得再点一次遮罩
       // 才能看到刚打开的对话。
       setDrawerOpen(false)
+      applySplitView(openSessionInView({ primaryId: activeId, split }, id), wsId ?? null)
     },
-    [],
+    [activeId, split, applySplitView],
   )
+
+  /* ---- 会话窗格渲染 ---- */
+
+  /** 主窗格的工作区切换(发消息前可切;已发消息后锁定,dsh 语义)。 */
+  const selectWorkspaceForPane = (ws: WorkspaceRecord) => {
+    if (locked) {
+      notify('err', t('lockedWorkspace'))
+      return
+    }
+    connectWorkspace(ws)
+  }
+
+  const openWorkspacePicker = () => {
+    if (workspaces.length === 0) openDirectoryFlow()
+    else setPickerOpen(true)
+  }
+
+  const toggleSidePane = () => {
+    // 从折叠态点开时,如果还没有任何标签,顺手开一个审查面板 ——
+    // 否则用户点了按钮只看到引导页,还要再点一次才有内容。
+    if (pane.collapsed && pane.state.tabs.length === 0) {
+      pane.openPanel('review')
+      return
+    }
+    pane.toggle()
+  }
+
+  /** 单窗格(未分屏)的会话页。 */
+  const renderSingleSession = () => (
+    <SessionsPage
+      key={activeId ?? 'draft'}
+      activeId={activeId}
+      locked={locked}
+      hasStarted={activeId ? !!startedIds[activeId] : false}
+      onSelectWorkspace={selectWorkspaceForPane}
+      onOpenPicker={openWorkspacePicker}
+      onAddWorkspace={openDirectoryFlow}
+      sidePaneOpen={!pane.collapsed && pane.state.tabs.length > 0}
+      onToggleSidePane={toggleSidePane}
+    />
+  )
+
+  /** 分屏窗格:副窗格不渲染工作区入口,会话切换约束在本窗格内。 */
+  const renderSplitPane = (slot: PaneSlot) => {
+    const id = slot === 'primary' ? activeId : split?.secondaryId ?? null
+    if (id === null) return null
+    const secondarySide: SplitSide = split?.side ?? 'right'
+    const side: SplitSide =
+      slot === 'secondary' ? secondarySide : secondarySide === 'left' ? 'right' : 'left'
+    return (
+      <div
+        key={slot}
+        className={`split-pane ${side}`}
+        data-focus={split?.focus === slot ? 'true' : 'false'}
+        onPointerDownCapture={() => focusPane(slot)}
+      >
+        <SessionsPage
+          key={id}
+          activeId={id}
+          locked={lockedFor(id)}
+          hasStarted={!!startedIds[id]}
+          onSelectWorkspace={selectWorkspaceForPane}
+          onOpenPicker={openWorkspacePicker}
+          onAddWorkspace={openDirectoryFlow}
+          sidePaneOpen={false}
+          secondary={slot === 'secondary'}
+          navigate={slot === 'secondary' ? navigateSecondary : undefined}
+        />
+      </div>
+    )
+  }
 
   // 扫码落地页:URL 带票据时整页交给远程门,先兑换会话再进控制台。
   if (gateActive) {
@@ -868,6 +1120,7 @@ export default function App() {
                 sessions={sessions}
                 workspaces={workspaces}
                 activeId={extensionTab ? null : activeId}
+                secondaryId={extensionTab ? null : split?.secondaryId ?? null}
                 runningIds={runningIds}
                 searchOpen={sidebarSearchOpen}
                 onSearchOpenChange={setSidebarSearchOpen}
@@ -976,41 +1229,58 @@ export default function App() {
           </div>
         )}
         <RemoteBanner local={localClient} />
-        <div className="main-row">
-          <div className="page-pane">
+        <div className="main-row" data-split={splitActive || undefined}>
+          <div
+            className="page-pane"
+            onDragOver={onPaneDragOver}
+            onDragLeave={onPaneDragLeave}
+            onDrop={onPaneDrop}
+          >
             {extensionTab ? (
               <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
                 <LazyExtensionsPage tab={extensionTab} cwd={paneWorkspacePath ?? undefined} onTabChange={openExtensions} notify={notify} />
               </Suspense>
-            ) : <SessionsPage
-              key={activeId ?? 'draft'}
-              activeId={activeId}
-              locked={locked}
-              hasStarted={activeId ? !!startedIds[activeId] : false}
-              onSelectWorkspace={(ws) => {
-                // 发消息前可切;已发消息后锁定(dsh 语义)。
-                if (locked) {
-                  notify('err', t('lockedWorkspace'))
-                  return
-                }
-                connectWorkspace(ws)
-              }}
-              onOpenPicker={() => {
-                if (workspaces.length === 0) openDirectoryFlow()
-                else setPickerOpen(true)
-              }}
-              onAddWorkspace={openDirectoryFlow}
-              sidePaneOpen={!pane.collapsed && pane.state.tabs.length > 0}
-              onToggleSidePane={() => {
-                // 从折叠态点开时,如果还没有任何标签,顺手开一个审查面板 ——
-                // 否则用户点了按钮只看到引导页,还要再点一次才有内容。
-                if (pane.collapsed && pane.state.tabs.length === 0) {
-                  pane.openPanel('review')
-                  return
-                }
-                pane.toggle()
-              }}
-            />}
+            ) : splitActive && split ? (
+              <div
+                className="split-view"
+                ref={splitViewRef}
+                style={{ '--split-left': `${splitRatio * 100}%` } as CSSProperties}
+              >
+                {renderSplitPane(split.side === 'left' ? 'secondary' : 'primary')}
+                <div className="split-divider">
+                  <div
+                    className="split-divider-grip"
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label={t('splitResize')}
+                    aria-valuenow={Math.round(splitRatio * 100)}
+                    aria-valuemin={Math.round(SPLIT_MIN_RATIO * 100)}
+                    aria-valuemax={Math.round(SPLIT_MAX_RATIO * 100)}
+                    tabIndex={0}
+                    onPointerDown={beginSplitDrag}
+                    onPointerMove={moveSplitDrag}
+                    onPointerUp={endSplitDrag}
+                    onPointerCancel={endSplitDrag}
+                    onKeyDown={keySplitDrag}
+                  />
+                  <button
+                    type="button"
+                    className="split-divider-exit"
+                    title={t('splitExit')}
+                    aria-label={t('splitExit')}
+                    data-testid="split-exit"
+                    onClick={() => setSplit(null)}
+                  >
+                    <IconClose size={12} />
+                  </button>
+                </div>
+                {renderSplitPane(split.side === 'left' ? 'primary' : 'secondary')}
+              </div>
+            ) : (
+              renderSingleSession()
+            )}
+            {/* 拖动侧栏会话经过会话区:半透明遮罩标出松开后的落点。 */}
+            {dragHint && <div className={`split-drop-hint ${dragHint}`} aria-hidden="true" />}
           </div>
           {/* 侧边面板在手机上不渲染:390px 宽放不下「对话 + 面板」两列,
               面板会把自己挤成一条缝,还会把主列的输入区顶出屏幕。
@@ -1019,7 +1289,7 @@ export default function App() {
           <SidePane
             sessionId={activeId}
             state={pane.state}
-            collapsed={pane.collapsed}
+            collapsed={pane.collapsed || splitActive}
             workspacePath={paneWorkspacePath}
             supportsBrowser={true}
             modelSelection={modelSelection}
@@ -1192,6 +1462,7 @@ function SidebarWorkspaces({
   sessions,
   workspaces,
   activeId,
+  secondaryId,
   runningIds,
   searchOpen,
   onSearchOpenChange,
@@ -1206,6 +1477,8 @@ function SidebarWorkspaces({
   sessions: SessionSummary[]
   workspaces: WorkspaceRecord[]
   activeId: string | null
+  /** 分屏副窗格的会话 id(弱高亮;null = 未分屏)。 */
+  secondaryId?: string | null
   runningIds: Record<string, boolean>
   searchOpen: boolean
   onSearchOpenChange: (open: boolean) => void
@@ -1470,6 +1743,7 @@ function SidebarWorkspaces({
                       session={session}
                       depth={depth}
                       active={session.id === activeId}
+                      secondaryActive={!!secondaryId && session.id === secondaryId}
                       running={!!runningIds[session.id]}
                       now={now}
                       childCount={descendantCount.get(session.id) ?? 0}
@@ -1559,6 +1833,7 @@ function SidebarWorkspaces({
                           session={session}
                           depth={depth}
                           active={session.id === activeId}
+                          secondaryActive={!!secondaryId && session.id === secondaryId}
                           running={!!runningIds[session.id]}
                           now={now}
                           childCount={descendantCount.get(session.id) ?? 0}
@@ -1589,6 +1864,7 @@ function SessionRow({
   session,
   depth = 0,
   active,
+  secondaryActive = false,
   running,
   now,
   childCount = 0,
@@ -1602,6 +1878,8 @@ function SessionRow({
   /** 血缘嵌套深度:0 = 顶层,>0 = 分支子会话(缩进显示)。 */
   depth?: number
   active: boolean
+  /** 分屏副窗格里的会话:弱高亮,与主窗格区分。 */
+  secondaryActive?: boolean
   running: boolean
   /** 行尾相对时间的当前时刻(侧栏级 60s 时钟)。 */
   now: number
@@ -1623,7 +1901,7 @@ function SessionRow({
   const dotRunning = running || (collapsed && childRunning)
   return (
     <div
-      className={`session-row-wrap${active ? ' active' : ''}${isChild ? ' nested' : ''}`}
+      className={`session-row-wrap${active ? ' active' : ''}${!active && secondaryActive ? ' secondary-active' : ''}${isChild ? ' nested' : ''}`}
       style={isChild ? ({ '--depth': depth } as CSSProperties) : undefined}
     >
       <span className="session-caret-slot">
@@ -1639,7 +1917,18 @@ function SessionRow({
           </button>
         )}
       </span>
-      <button type="button" className="session-row" onClick={onOpen}>
+      <button
+        type="button"
+        className="session-row"
+        onClick={onOpen}
+        // 拖到会话区进入分屏:自定义 MIME,只被会话区落点接管
+        // (文件/文本拖拽走各自的类型,互不打扰)。
+        draggable
+        onDragStart={(event) => {
+          event.dataTransfer.setData(SESSION_DRAG_MIME, session.id)
+          event.dataTransfer.effectAllowed = 'copy'
+        }}
+      >
         <span className="lead">
           {session.cwd_alive === false ? (
             <span className="dot err" title={t('deadCwd')} />

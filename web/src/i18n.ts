@@ -1099,6 +1099,11 @@ const zh = {
   sidePaneTimeHours: '小时前',
   sidePaneTimeDays: '天前',
 
+  /* ---- 分屏(拖动侧栏会话到会话窗口) ---- */
+
+  splitExit: '退出分屏',
+  splitResize: '拖动调整窗格宽度',
+
   /* ---- 审查面板 ---- */
   sidePaneReviewSource: '审查来源',
   sidePaneReviewUnstaged: '未暂存',
@@ -2335,6 +2340,11 @@ const en: typeof zh = {
   sidePaneTimeMinutes: 'min ago',
   sidePaneTimeHours: 'h ago',
   sidePaneTimeDays: 'd ago',
+
+  /* ---- Split view (drag a sidebar session into the conversation area) ---- */
+
+  splitExit: 'Exit split view',
+  splitResize: 'Drag to resize panes',
 
   /* ---- Review panel ---- */
   sidePaneReviewSource: 'Review source',

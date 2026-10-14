@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { t } from '../i18n'
+import { useClampedPopover } from '../hooks/useClampedPopover'
 import { IconCheck, IconChevronDown } from './icons'
 import { IconPermissionRead, IconPermissionEdit, IconPermissionPlan, IconPermissionFull } from './SettingsIcons'
 import { normalizePermissionMode } from '../types'
@@ -63,6 +64,10 @@ export function PermissionSelector({
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
+  // 浮层夹取:分屏窗格窄时,贴 chip 展开的菜单会被窗格裁掉(见 hook 注释)。
+  const selectorRef = useRef<HTMLDivElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const menuStyle = useClampedPopover({ anchorRef: selectorRef, popoverRef: menuRef, open, align: 'left' })
 
   // Esc 关闭弹层(点击外部已由 menu-backdrop 承担)。
   useEffect(() => {
@@ -84,7 +89,7 @@ export function PermissionSelector({
   const ActiveIcon = active.icon
 
   return (
-    <div className={`permission-selector${open ? ' open' : ''}`}>
+    <div className={`permission-selector${open ? ' open' : ''}`} ref={selectorRef}>
       <button
         type="button"
         className={`permission-chip${open ? ' open' : ''}`}
@@ -103,7 +108,7 @@ export function PermissionSelector({
       {open && (
         <>
           <div className="menu-backdrop" onClick={() => setOpen(false)} />
-          <div className="permission-menu" role="menu" aria-label={t('permissionLabel')}>
+          <div className="permission-menu" role="menu" aria-label={t('permissionLabel')} ref={menuRef} style={menuStyle}>
             <div className="permission-menu-heading">{t('permissionLabel')}</div>
             {PERMISSION_LEVELS.map(({ level, icon: Icon, nameKey, descKey }) => {
               const selected = value === level

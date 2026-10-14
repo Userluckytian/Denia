@@ -9,6 +9,7 @@ import {
 } from 'react'
 import { formatContextWindow, resolveSessionReasoningEffort } from '../modelCatalog'
 import { t } from '../i18n'
+import { useClampedPopover } from '../hooks/useClampedPopover'
 import type {
   CatalogModel,
   ModelCatalog,
@@ -119,6 +120,9 @@ export function ComposerModelMenu({
   const chipRef = useRef<HTMLButtonElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
   const filtersRef = useRef<HTMLDivElement | null>(null)
+  // 浮层夹取:分屏窗格窄时,贴 chip 展开的菜单会被窗格裁掉(见 hook 注释)。
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const menuStyle = useClampedPopover({ anchorRef: rootRef, popoverRef: menuRef, open, align: 'right' })
 
   const groups = catalog.groups
   const group = groups.find((g) => g.id === selection.provider)
@@ -345,7 +349,7 @@ export function ComposerModelMenu({
       {open && (
         <>
           <div className="menu-backdrop" onClick={closeMenu} />
-          <div className="model-menu" role="menu" aria-label={t('modelPickerLabel')}>
+          <div className="model-menu" role="menu" aria-label={t('modelPickerLabel')} ref={menuRef} style={menuStyle}>
             <div className="model-menu-search">
               <IconSearch size={13} />
               {/* 不给 type:一旦写成 type="text",就会命中 controls.css 里
