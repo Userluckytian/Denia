@@ -21,34 +21,33 @@ export interface ActiveAtToken {
 
 /**
  * 提取光标处的 `@path` / `@"path with spaces` token。`@` 前必须是行首或
- * 空白(user@host 这类嵌入 token 不是触发点)。draft 为 textarea 全文,
- * 正则里的 `\s` 天然覆盖换行,与逐行语义等价。
+ * 空白(user@host 这类嵌入 token 不是触发点)。查询允许同一行的空格分隔
+ * 关键词;新的 `@` 开始新的查询,闭引号与换行结束当前查询。
  */
 export function activeAtToken(draft: string, caret: number): ActiveAtToken | undefined {
   const beforeCursor = draft.slice(0, Math.max(0, Math.min(caret, draft.length)))
-  const quoted = /(?:^|\s)(@"([^"]*))$/u.exec(beforeCursor)
+  const quoted = /(?:^|\s)(@"([^"\r\n@]*))$/u.exec(beforeCursor)
   if (quoted?.[1] !== undefined && quoted[2] !== undefined) {
     return { prefix: quoted[1], query: quoted[2], quoted: true }
   }
-  const plain = /(?:^|\s)(@([^\s]*))$/u.exec(beforeCursor)
+  const plain = /(?:^|\s)(@([^"\r\n@]*))$/u.exec(beforeCursor)
   if (plain?.[1] === undefined || plain[2] === undefined) return undefined
   return { prefix: plain[1], query: plain[2], quoted: false }
 }
 
 /**
  * 把选中的候选格式化为插入文本(对照 dsh `formatFileMention`):
- * 目录尾补 `/`;路径含空白或原本就在 `@"` 里时用引号形式——文件闭合引号、
- * 目录保持引号打开(可继续在引号内下钻);无法安全表示的路径返回 undefined。
+ * 目录尾补 `/`;路径含空白或原本就在 `@"` 里时用闭合引号形式;
+ * 无法安全表示的路径返回 undefined。
  */
 export function formatFileMention(
   candidate: MentionCandidate,
   preserveQuote: boolean,
 ): string | undefined {
-  const path = candidate.kind === 'directory' ? `${candidate.path}/` : candidate.path
-  if (/[\u0000-\u001f\u007f-\u009f"]/u.test(path)) return undefined
+  const path = candidate.kind === 'directory' ? `${candidate.path.replace(/\/+$/u, '')}/` : candidate.path
+  if (!candidate.path || /[\u0000-\u001f\u007f-\u009f"]/u.test(path)) return undefined
   const quoted = preserveQuote || /\s/u.test(path)
   if (!quoted) return `@${path}`
-  if (candidate.kind === 'directory') return `@"${path}`
   return `@"${path}"`
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { t } from '../i18n'
-import { IconCheck, IconChevronDown, IconEye, IconPencil, IconPlan, IconZap } from './icons'
+import { IconCheck, IconChevronDown } from './icons'
+import { IconPermissionRead, IconPermissionEdit, IconPermissionPlan, IconPermissionFull } from './SettingsIcons'
 import { normalizePermissionMode } from '../types'
 import type { PermissionMode } from '../types'
 import type { ComponentType } from 'react'
@@ -35,10 +36,10 @@ export const PERMISSION_LEVELS: ReadonlyArray<{
   nameKey: MessageKey
   descKey: MessageKey
 }> = [
-  { level: 'read-only', icon: IconEye, nameKey: 'permissionReadOnly', descKey: 'permissionReadOnlyDesc' },
-  { level: 'auto-edit', icon: IconPencil, nameKey: 'permissionAutoEdit', descKey: 'permissionAutoEditDesc' },
-  { level: 'plan', icon: IconPlan, nameKey: 'permissionPlan', descKey: 'permissionPlanDesc' },
-  { level: 'full', icon: IconZap, nameKey: 'permissionFull', descKey: 'permissionFullDesc' },
+  { level: 'read-only', icon: IconPermissionRead, nameKey: 'permissionReadOnly', descKey: 'permissionReadOnlyDesc' },
+  { level: 'auto-edit', icon: IconPermissionEdit, nameKey: 'permissionAutoEdit', descKey: 'permissionAutoEditDesc' },
+  { level: 'plan', icon: IconPermissionPlan, nameKey: 'permissionPlan', descKey: 'permissionPlanDesc' },
+  { level: 'full', icon: IconPermissionFull, nameKey: 'permissionFull', descKey: 'permissionFullDesc' },
 ]
 
 function levelMeta(level: PermissionMode) {

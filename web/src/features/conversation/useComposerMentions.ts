@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import * as api from '../../api'
 import type { MentionCandidate } from '../../api'
-import { activeAtToken, formatFileMention } from '../../pages/mention'
-import { caretOffsetIn, selectRange, serializeEditor } from '../../pages/editor'
+import { activeAtToken } from '../../pages/mention'
+import { activeFileTokenIn, caretOffsetIn, insertFileChip, serializeEditor } from '../../pages/editor'
 
 interface Options {
   mentionCwd: string | null
@@ -16,18 +16,15 @@ export function useComposerMentions({ mentionCwd, promptRef, onDraftChange, sync
   const [mentionOpen, setMentionOpen] = useState(false)
   const [mentionItems, setMentionItems] = useState<MentionCandidate[]>([])
   const [mentionLoading, setMentionLoading] = useState(false)
-  /** 当前查询串(空态提示区分"根目录为空"与"无匹配")。 */
+  /** 当前查询串(空态提示区分工作区为空与无匹配)。 */
   const [mentionQuery, setMentionQuery] = useState('')
   const [mentionActive, setMentionActive] = useState(0)
   const mentionMenuRef = useRef<HTMLDivElement | null>(null)
   const mentionDebounceRef = useRef<number | null>(null)
   const mentionAbortRef = useRef<AbortController | null>(null)
+  const activeQueryRef = useRef<string | null>(null)
   // IME 组词阶段不触发检测/选择旁路(对照模型菜单的 isComposing 旁路)。
   // 候选范围 = 已存活会话的 cwd;无会话或 cwd 失效时不触发。
-  // 下钻时显示当前位置(query 含 / 时取目录前缀),对照 dsh 的面包屑头部。
-  const mentionDir = mentionQuery.includes('/')
-    ? mentionQuery.slice(0, mentionQuery.lastIndexOf('/') + 1)
-    : ''
 
   const closeMention = useCallback(() => {
     if (mentionDebounceRef.current !== null) {
@@ -36,6 +33,7 @@ export function useComposerMentions({ mentionCwd, promptRef, onDraftChange, sync
     }
     mentionAbortRef.current?.abort()
     mentionAbortRef.current = null
+    activeQueryRef.current = null
     setMentionOpen(false)
     setMentionItems([])
     setMentionLoading(false)
@@ -49,15 +47,22 @@ export function useComposerMentions({ mentionCwd, promptRef, onDraftChange, sync
         closeMention()
         return
       }
-      const token = activeAtToken(text, caret)
+      const token = promptRef.current
+        ? activeFileTokenIn(promptRef.current, text, caret)
+        : activeAtToken(text, caret)
       if (!token) {
         closeMention()
         return
       }
+      const key = JSON.stringify([cwd, caret - token.prefix.length, token.query])
+      if (activeQueryRef.current === key) return
+      activeQueryRef.current = key
       mentionAbortRef.current?.abort()
       setMentionQuery(token.query)
       setMentionOpen(true)
       setMentionLoading(true)
+      setMentionItems([])
+      setMentionActive(0)
       if (mentionDebounceRef.current !== null) window.clearTimeout(mentionDebounceRef.current)
       mentionDebounceRef.current = window.setTimeout(() => {
         mentionDebounceRef.current = null
@@ -81,24 +86,21 @@ export function useComposerMentions({ mentionCwd, promptRef, onDraftChange, sync
           })
       }, 150)
     },
-    [mentionCwd, closeMention],
+    [mentionCwd, closeMention, promptRef],
   )
 
-  /** 选中候选:用格式化文本替换当前 token,补空格,光标随插入内容其后。 */
+  /** 选中候选:用原子文件标签替换查询,光标移到标签后。 */
   const pickMention = useCallback(
     (candidate: MentionCandidate) => {
       const el = promptRef.current
       if (!el || document.activeElement !== el) return
       const text = serializeEditor(el)
       const caret = caretOffsetIn(el)
-      const token = activeAtToken(text, caret)
+      const token = promptRef.current
+        ? activeFileTokenIn(promptRef.current, text, caret)
+        : activeAtToken(text, caret)
       if (!token) return
-      const mention = formatFileMention(candidate, token.quoted)
-      if (mention === undefined) return
-      const after = text.slice(caret)
-      const suffix = after.length === 0 || !/^\s/u.test(after) ? ' ' : ''
-      selectRange(el, caret - token.prefix.length, caret)
-      document.execCommand('insertText', false, `${mention}${suffix}`)
+      if (!insertFileChip(el, candidate, caret - token.prefix.length, caret, token.quoted)) return
       onDraftChange(serializeEditor(el))
       closeMention()
       syncPromptHeight()
@@ -127,5 +129,5 @@ export function useComposerMentions({ mentionCwd, promptRef, onDraftChange, sync
   }, [])
 
   return { mentionOpen, mentionItems, mentionLoading, mentionQuery, mentionActive, setMentionActive,
-    mentionMenuRef, mentionDir, closeMention, refreshMentions, pickMention }
+    mentionMenuRef, closeMention, refreshMentions, pickMention }
 }

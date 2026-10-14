@@ -1,24 +1,28 @@
 /**
  * contentEditable 输入器的纯 DOM 操作层(零 React 依赖)。
  *
- * 结构纪律:编辑器内只有三类顶层节点——文本节点、`<br>`(Shift+Enter 产生)、
- * slash 卡片(`contenteditable="false"` 的 `.slash-chip`,携带 data-slash)。
- * 序列化时卡片展开为 `/name`,与 textarea 时代的草稿字符串完全同构,发送
+ * 结构纪律:编辑器内只有文本节点、`<br>`(Shift+Enter 产生)和不可编辑卡片。
+ * slash 卡片携带 data-slash,文件卡片携带完整引用 data-file-mention。
+ * 序列化时卡片展开为 `/name` 或 `@path`,与纯文本草稿完全同构,发送
  * 链路(命令裁定/技能收集/后端手势)因此零改动;粘贴统一降级纯文本,结构
  * 不会被富 HTML 污染。
  *
  * 「草稿偏移」= 序列化字符串里的字符下标,是所有触发检测/插入/光标操作的
- * 唯一坐标系:卡片占 `1 + name.length` 个字符(即 `/name`),卡片内部偏移
+ * 唯一坐标系:卡片长度按其完整序列化 token 计算,卡片内部偏移
  * 一律钳到卡片之后。
  */
 
 import { COMMAND_GLYPHS, glyphSvg } from '../lib/slashGlyphs'
 import { scanSlashTokens } from './slash'
+import { activeAtToken, formatFileMention, type MentionCandidate, type ActiveAtToken } from './mention'
 
 export type SlashChipKind = 'command' | 'skill'
 
-/** 卡片在草稿里的字符数(`/${name}`)。 */
-const chipTokenLength = (name: string): number => name.length + 1
+function chipToken(node: Node): string | null {
+  if (node.nodeType !== Node.ELEMENT_NODE) return null
+  const element = node as HTMLElement
+  return element.dataset.fileMention || (chipName(node) ? `/${chipName(node)}` : null)
+}
 
 /** 节点若是 slash 卡片,返回其技能/命令名。 */
 function chipName(node: Node): string | null {
@@ -27,11 +31,11 @@ function chipName(node: Node): string | null {
   return name || null
 }
 
-/** 单个节点的草稿长度(text 按字符、chip 按 `/name`、br 按 1、其余递归)。 */
+/** 单个节点的草稿长度(text 按字符、chip 按完整 token、br 按 1、其余递归)。 */
 function draftLength(node: Node): number {
   if (node.nodeType === Node.TEXT_NODE) return (node as Text).length
-  const name = chipName(node)
-  if (name) return chipTokenLength(name)
+  const token = chipToken(node)
+  if (token) return token.length
   if ((node as HTMLElement).tagName === 'BR') return 1
   let sum = 0
   node.childNodes.forEach((child) => {
@@ -40,7 +44,7 @@ function draftLength(node: Node): number {
   return sum
 }
 
-/** 序列化编辑器为草稿字符串(卡片展开为 `/name`,br 为换行)。 */
+/** 序列化编辑器为草稿字符串(卡片展开为完整 token,br 为换行)。 */
 export function serializeEditor(editor: HTMLElement): string {
   let out = ''
   const walk = (node: Node) => {
@@ -50,9 +54,9 @@ export function serializeEditor(editor: HTMLElement): string {
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return
     const el = node as HTMLElement
-    const name = chipName(el)
-    if (name) {
-      out += `/${name}`
+    const token = chipToken(el)
+    if (token) {
+      out += token
       return
     }
     if (el.tagName === 'BR') {
@@ -103,6 +107,9 @@ function offsetIn(editor: HTMLElement, startContainer: Node, startOffset: number
   }
   let total = 0
   for (const node of Array.from(editor.childNodes)) {
+    if (chipToken(node) && (node === startContainer || node.contains(startContainer))) {
+      return total + draftLength(node)
+    }
     if (node === startContainer) {
       return total + (node.nodeType === Node.TEXT_NODE ? startOffset : 0)
     }
@@ -188,7 +195,7 @@ export function caretRightAfterChip(editor: HTMLElement): boolean {
   const { startContainer, startOffset } = selection.getRangeAt(0)
   if (startContainer !== editor || startOffset === 0) return false
   const previous = editor.childNodes[startOffset - 1]
-  return previous ? chipName(previous) !== null : false
+  return previous ? chipToken(previous) !== null : false
 }
 
 /**
@@ -228,6 +235,8 @@ export function caretOffsetAtPoint(editor: HTMLElement, x: number, y: number): n
     }
     return total
   }
+  const containingChip = Array.from(editor.childNodes).find((node) => chipToken(node) && (node === container || node.contains(container)))
+  if (containingChip) return offsetIn(editor, container, offset)
   // 文本节点内的落点:累加它之前所有兄弟节点的草稿长度。
   let total = 0
   const walk = (root: Node): boolean => {
@@ -285,6 +294,61 @@ export function createSlashChip(name: string, kind: SlashChipKind): HTMLElement 
   return chip
 }
 
+export function createFileChip(candidate: MentionCandidate, preserveQuote = false): HTMLElement | null {
+  const token = formatFileMention(candidate, preserveQuote)
+  if (!token) return null
+  const chip = document.createElement('span')
+  chip.className = 'file-chip'
+  chip.setAttribute('contenteditable', 'false')
+  chip.dataset.fileMention = token
+  chip.dataset.kind = candidate.kind
+  chip.title = candidate.path
+  const icon = document.createElement('span')
+  icon.className = 'file-chip-icon'
+  icon.innerHTML = candidate.kind === 'directory'
+    ? '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"><path d="M2 4h5l1.5 2H14v7H2V4Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>'
+    : '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"><path d="M4 2h5l3 3v9H4V2Z M9 2v4h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>'
+  const label = document.createElement('span')
+  label.className = 'file-chip-label'
+  label.textContent = candidate.path.replace(/[\\/]+$/u, '').split(/[\\/]/u).pop() || candidate.path
+  chip.append(icon, label)
+  return chip
+}
+
+/** 文件标签与其空白在同一次原生编辑操作中插入,保留撤销事务。 */
+export function insertFileChip(
+  editor: HTMLElement,
+  candidate: MentionCandidate,
+  start: number,
+  end: number,
+  preserveQuote = false,
+): boolean {
+  const chip = createFileChip(candidate, preserveQuote)
+  if (!chip) return false
+  const text = serializeEditor(editor)
+  const from = Math.max(0, Math.min(start, end, text.length))
+  const to = Math.max(from, Math.min(Math.max(start, end), text.length))
+  const leading = from > 0 && !/\s/u.test(text[from - 1]!) ? ' ' : ''
+  const trailing = to === text.length || !/\s/u.test(text[to]!) ? ' ' : ''
+  editor.focus()
+  selectRange(editor, from, to)
+  if (!document.execCommand('insertHTML', false, `${leading}${chip.outerHTML}${trailing}`)) return false
+  setCaretOffset(editor, from + leading.length + chip.dataset.fileMention!.length + trailing.length)
+  return true
+}
+
+/** 已完成的原子标签不能成为新的多关键词查询起点。 */
+export function activeFileTokenIn(editor: HTMLElement, text: string, caret: number): ActiveAtToken | undefined {
+  let boundary = 0
+  let offset = 0
+  for (const node of Array.from(editor.childNodes)) {
+    offset += draftLength(node)
+    if (chipToken(node) && offset <= caret) boundary = offset
+    else if (chipToken(node) && offset - draftLength(node) < caret) return undefined
+  }
+  return activeAtToken(text.slice(boundary), caret - boundary)
+}
+
 /**
  * 用草稿字符串整体重建编辑器内容(外部写路径:清空/回填/撤销优化),命中
  * 词典的 token 重建为卡片;不动 undo 栈——这些场景本来就是整段替换。
@@ -295,19 +359,30 @@ export function renderDraft(
   kinds: ReadonlyMap<string, SlashChipKind>,
 ): void {
   const fragment = document.createDocumentFragment()
-  const pushText = (value: string) => {
+  const pushPlainText = (value: string) => {
     const parts = value.split('\n')
     parts.forEach((part, index) => {
       if (index > 0) fragment.appendChild(document.createElement('br'))
       if (part) fragment.appendChild(document.createTextNode(part))
     })
   }
-  for (const segment of scanSlashTokens(text, [...kinds.keys()])) {
-    if (segment.name) {
-      fragment.appendChild(createSlashChip(segment.name, kinds.get(segment.name) ?? 'skill'))
-    } else {
-      pushText(segment.text)
+  const pushText = (value: string) => {
+    for (const segment of scanSlashTokens(value, [...kinds.keys()])) {
+      if (segment.name) fragment.appendChild(createSlashChip(segment.name, kinds.get(segment.name) ?? 'skill'))
+      else pushPlainText(segment.text)
     }
   }
+  const references = /(^|\s)@(?:"([^"\r\n]+)"|([^\s"]+))(?=\s|$)/gu
+  let end = 0
+  for (const match of text.matchAll(references)) {
+    const start = match.index! + match[1]!.length
+    const path = match[2] ?? match[3]!
+    const chip = createFileChip({ path, kind: path.endsWith('/') ? 'directory' : 'file' }, match[2] !== undefined)
+    if (!chip) continue
+    pushText(text.slice(end, start))
+    fragment.appendChild(chip)
+    end = match.index! + match[0].length
+  }
+  pushText(text.slice(end))
   editor.replaceChildren(fragment)
 }

@@ -160,9 +160,9 @@ const entry = (path, kind) => ({ path, name: path.slice(path.lastIndexOf('/') + 
     '@"my docs/read me.md"',
   )
   check(
-    'dnd:含空格的目录保持引号打开',
+    'dnd:含空格的目录闭合引号',
     pure.referenceText({ path: 'my docs', kind: 'directory' }),
-    '@"my docs/',
+    '@"my docs/"',
   )
   // 垃圾载荷不能抛(拖拽数据来自浏览器,什么都可能是)。
   check('dnd:非 JSON 返回 null', pure.decodeReference('not json'), null)

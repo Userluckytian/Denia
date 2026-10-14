@@ -10,16 +10,11 @@ import { subscribeServerEvents } from '../serverEvents'
 import { useIsMobile } from '../hooks/useIsMobile'
 import type { Notify } from '../App'
 import {
-  IconAgentPreset,
   IconArrowLeft,
   IconChevron,
   IconClose,
-  IconGear,
-  IconGlobe,
-  IconPrompt,
-  IconSliders,
-  IconStack,
 } from './icons'
+import { IconSettingsGeneral, IconSettingsAgents, IconSettingsPresets, IconSettingsPrompt, IconSettingsModels, IconSettingsMemory, IconSettingsRemote, IconSettingsRuntime, IconSettingsAppearance } from './SettingsIcons'
 import { LlmPanel } from './llm/LlmPanel'
 import { AgentPresetSettings } from './settings/AgentPresetSettings'
 import { normalizePermissionMode, type PermissionMode } from '../types'
@@ -69,23 +64,23 @@ function normalizeDefaultPermission(raw: unknown): PermissionMode {
 function tabIcon(tab: SettingsTab, size = 16) {
   switch (tab) {
     case 'runtime':
-      return <IconGear size={size} />
+      return <IconSettingsRuntime size={size} />
     case 'subagents':
-      return <IconAgentPreset size={size} />
+      return <IconSettingsAgents size={size} />
     case 'general':
-      return <IconStack size={size} />
+      return <IconSettingsGeneral size={size} />
     case 'presets':
-      return <IconAgentPreset size={size} />
+      return <IconSettingsPresets size={size} />
     case 'prompts':
-      return <IconPrompt size={size} />
+      return <IconSettingsPrompt size={size} />
     case 'models':
-      return <IconSliders size={size} />
+      return <IconSettingsModels size={size} />
     case 'memory':
-      return <IconStack size={size} />
+      return <IconSettingsMemory size={size} />
     case 'remote':
-      return <IconGlobe size={size} />
+      return <IconSettingsRemote size={size} />
     case 'appearance':
-      return <IconGear size={size} />
+      return <IconSettingsAppearance size={size} />
   }
 }
 

@@ -210,7 +210,7 @@ const MENTION_EXCLUDED_DIRS: &[&str] = &[
     ".gradle",
 ];
 
-/// 每个工作区一份的全树索引(裸词查询共享;目录下钻实时读,不走索引)。
+/// 每个工作区一份的全树索引,所有提及查询共享。
 struct MentionIndex {
     /// 建立索引时的根目录 mtime;根目录直接子项增删会变,作辅助失效信号。
     root_mtime: Option<SystemTime>,
@@ -224,13 +224,13 @@ struct MentionIndex {
 ///
 /// 查询是高频操作(每次击键防抖后都来一次),全量 1 万条目逐条
 /// `to_lowercase()` + `split('/')` 既重复分配又重复计算;挪到低频的
-/// 建索引时一次做完,查询期只做 `find`/子序列扫描,零重复分配。
+/// 建索引时一次做完,查询期只做关键词子串匹配。
 #[derive(Debug, Clone)]
 struct IndexedMention {
     /// 相对根的路径原文(以 `/` 分隔;API 原样返回)。
     path: String,
     kind: &'static str,
-    /// 全路径小写:子串/模糊档直接复用,不再逐条转小写。
+    /// 全路径小写:路径关键词匹配直接复用,不再逐条转小写。
     lower: String,
     /// 基名小写:文件名档优先于全路径档,避免深目录前缀喧宾夺主。
     file_lower: String,
@@ -260,66 +260,30 @@ impl IndexedMention {
     }
 }
 
-/// 匹配档(越小越靠前):前缀档保留原有前缀用法的最优先位置,
-/// 模糊档让 `srd` 这类非连续输入也能命中。
-const TIER_PREFIX: u8 = 0;
-const TIER_BASENAME_SUBSTRING: u8 = 1;
-const TIER_PATH_SUBSTRING: u8 = 2;
-const TIER_BASENAME_FUZZY: u8 = 3;
-const TIER_PATH_FUZZY: u8 = 4;
-
-/// 子序列模糊匹配:needle 各字符按序出现在 hay 中即可(已小写,调用方保证)。
-/// 返回(首命中字节下标, 首尾跨度内跳过的字符数),跨度越小匹配越紧凑。
-fn fuzzy_match(hay: &str, needle: &str) -> Option<(usize, usize)> {
-    let mut needle_iter = needle.chars();
-    let mut want = needle_iter.next()?;
-    let mut first_byte: Option<usize> = None;
-    let mut span_chars = 0usize;
-    let mut matched = 0usize;
-    for (byte_idx, ch) in hay.char_indices() {
-        if first_byte.is_some() {
-            span_chars += 1;
-        }
-        if ch == want {
-            if first_byte.is_none() {
-                first_byte = Some(byte_idx);
-                span_chars = 1;
-            }
-            matched += 1;
-            match needle_iter.next() {
-                Some(next) => want = next,
-                None => return first_byte.map(|first| (first, span_chars - matched)),
-            }
-        }
+/// 所有关键词都必须命中;文件名精确 > 文件名前缀 > 文件名子串 > 路径子串。
+/// 按最弱匹配档、总档位和位置排序,不依赖关键词输入顺序。
+fn match_mention(entry: &IndexedMention, keywords: &[&str]) -> Option<(u8, usize, usize)> {
+    let mut worst_tier = 0;
+    let mut total_tier = 0;
+    let mut position = 0;
+    for keyword in keywords {
+        let (tier, pos) = if entry.file_lower == *keyword {
+            (0, 0)
+        } else if entry.file_lower.starts_with(keyword) {
+            (1, 0)
+        } else if let Some(pos) = entry.file_lower.find(keyword) {
+            (2, pos)
+        } else {
+            (3, entry.lower.find(keyword)?)
+        };
+        worst_tier = worst_tier.max(tier);
+        total_tier += usize::from(tier);
+        position += pos;
     }
-    None
+    Some((worst_tier, total_tier, position))
 }
 
-/// 对一条索引做分档打分,返回(档, 起始下标, 间隙)。
-/// 档内按起始越早、间隙越小排序;前缀输入(`sub`)仍命中前缀档第一位。
-fn match_mention(entry: &IndexedMention, needle: &str) -> Option<(u8, usize, usize)> {
-    if needle.is_empty() {
-        return Some((TIER_BASENAME_SUBSTRING, 0, 0));
-    }
-    if entry.file_lower.starts_with(needle) || entry.lower.starts_with(needle) {
-        return Some((TIER_PREFIX, 0, 0));
-    }
-    if let Some(pos) = entry.file_lower.find(needle) {
-        return Some((TIER_BASENAME_SUBSTRING, pos, 0));
-    }
-    if let Some(pos) = entry.lower.find(needle) {
-        return Some((TIER_PATH_SUBSTRING, pos, 0));
-    }
-    if let Some((pos, gaps)) = fuzzy_match(&entry.file_lower, needle) {
-        return Some((TIER_BASENAME_FUZZY, pos, gaps));
-    }
-    if let Some((pos, gaps)) = fuzzy_match(&entry.lower, needle) {
-        return Some((TIER_PATH_FUZZY, pos, gaps));
-    }
-    None
-}
-
-/// 裸词查询的全局索引缓存(按 cwd 隔离;与 skills.rs 的 SUMMARY_CACHE 同款
+/// 提及查询的全局索引缓存(按 cwd 隔离;与 skills.rs 的 SUMMARY_CACHE 同款
 /// OnceLock<Mutex<...>> 模式)。过期/根变化时在锁外重建,旧索引保持应答到新索引就绪。
 static MENTION_INDEX_CACHE: OnceLock<Mutex<HashMap<PathBuf, MentionIndex>>> = OnceLock::new();
 
@@ -336,7 +300,7 @@ fn mention_index_cache() -> &'static Mutex<HashMap<PathBuf, MentionIndex>> {
     MENTION_INDEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 裸词查询:命中且新鲜直接过滤(零系统调用);0 结果时穿透即时重建一次
+/// 提及查询:命中且新鲜直接过滤;0 结果时穿透即时重建一次
 /// (新文件在旧索引里不可见),否则锁外全树扫描 + 双检写入。
 fn search_mention_index(root: &Path, query: &str) -> Vec<MentionItem> {
     let needle = query.to_lowercase();
@@ -434,29 +398,30 @@ fn scan_mention_index(root: &Path) -> Vec<IndexedMention> {
     indexed
 }
 
-/// 对索引条目做大小写不敏感分档匹配 + 目录优先/档/位置/间隙/字典序 + 截断。
-/// 档位(保证前缀与子串用法排在模糊之前):
-/// 基名前缀 > 基名子串(`red` 命中 `subagent-redesign.md`) >
-/// 全路径子串 > 基名模糊(`sard` 命中 `subagent-redesign.md`) > 全路径模糊。
-/// 隐藏文件只在 query 以 `.` 开头时可见(显式引用点文件)。
+/// 多关键词 AND 匹配,相关性优先于目录类型;空查询优先浅层候选。
+/// 隐藏文件只在关键词显式包含点文件路径段时可见。
 /// 性能:只 clone 最终返回的前 50 条,排序用 Top-N 部分选择而非全量排序。
 fn filter_mention_entries(entries: &[IndexedMention], needle: &str) -> Vec<MentionItem> {
-    let show_hidden = needle.starts_with('.');
+    let keywords: Vec<&str> = needle.split_whitespace().collect();
+    let show_hidden = keywords
+        .iter()
+        .any(|keyword| keyword.split('/').any(|segment| segment.starts_with('.')));
     // 先收集命中的(引用,档位):档位比较零分配,只在最后 clone 前 50 条。
     // select_nth_unstable 取 Top-N(O(n))替代全量排序 O(n log n)。
-    let mut scored: Vec<(&IndexedMention, (u8, u8, usize, usize))> = Vec::new();
+    let mut scored: Vec<(&IndexedMention, (u8, usize, usize, usize, u8))> = Vec::new();
     for entry in entries {
         if !show_hidden && entry.is_hidden {
             continue;
         }
-        let Some((tier, pos, gaps)) = match_mention(entry, needle) else {
+        let Some((tier, total_tier, pos)) = match_mention(entry, &keywords) else {
             continue;
         };
         let rank = (
-            if entry.kind == "directory" { 0u8 } else { 1u8 },
             tier,
+            total_tier,
             pos,
-            gaps,
+            entry.path.bytes().filter(|byte| *byte == b'/').count(),
+            if entry.kind == "directory" { 0u8 } else { 1u8 },
         );
         scored.push((entry, rank));
     }
@@ -468,11 +433,11 @@ fn filter_mention_entries(entries: &[IndexedMention], needle: &str) -> Vec<Menti
     scored.iter().map(|(entry, _)| entry.item()).collect()
 }
 
-/// 完整排序口径:目录优先 → 档位 → 起始位置 → 间隙 → 小写字典序 → 原文 tiebreak。
+/// 完整排序口径:相关性 → 路径深度 → 目录类型 → 小写字典序 → 原文 tiebreak。
 /// 过滤与截断共用同一口径,截断不会误删排序靠前的条目。
 fn compare_scored(
-    left: &(&IndexedMention, (u8, u8, usize, usize)),
-    right: &(&IndexedMention, (u8, u8, usize, usize)),
+    left: &(&IndexedMention, (u8, usize, usize, usize, u8)),
+    right: &(&IndexedMention, (u8, usize, usize, usize, u8)),
 ) -> std::cmp::Ordering {
     left.1
         .cmp(&right.1)
@@ -494,8 +459,8 @@ struct MentionsQuery {
     query: Option<String>,
 }
 
-/// `@` 提及候选:query 为空或含 `/` 时按目录定向列举(可下钻),裸词时
-/// 全树索引 + 大小写不敏感子串匹配。fs 访问放 spawn_blocking,不挡异步运行时。
+/// `@` 提及候选:统一使用全树索引,按空白分隔的关键词做 AND 子串匹配。
+/// fs 访问放 spawn_blocking,不挡异步运行时。
 async fn list_mentions(Query(query): Query<MentionsQuery>) -> Result<impl IntoResponse, ApiError> {
     let inner = tokio::task::spawn_blocking(move || {
         mentions_impl(query.path.as_str(), query.query.as_deref().unwrap_or(""))
@@ -521,15 +486,7 @@ fn mentions_impl(path: &str, raw_query: &str) -> Result<Vec<MentionItem>, ApiErr
         ));
     }
     let query = raw_query.replace('\\', "/");
-    if query.is_empty() || query.contains('/') {
-        // 目录定向列举(空查询 = 根目录)。
-        let slash = query.rfind('/').map(|index| index + 1).unwrap_or(0);
-        let directory = query[..slash].strip_prefix("./").unwrap_or(&query[..slash]);
-        let fragment = &query[slash..];
-        Ok(list_mention_directory(&root, directory, fragment))
-    } else {
-        Ok(search_mention_index(&root, &query))
-    }
+    Ok(search_mention_index(&root, &query))
 }
 
 /// 解析目录前缀(相对根):拒绝 `..` 逃逸、绝对路径段与 Windows 盘符段;
@@ -554,75 +511,10 @@ fn resolve_relative_directory(root: &Path, directory: &str) -> Option<PathBuf> {
     abs.is_dir().then_some(abs)
 }
 
-/// 目录定向列举:按 basename 分档匹配 fragment(前缀 > 子串 > 模糊),
-/// 目录优先 + 档/位置/间隙 + 小写字典序。隐藏条目只在 fragment 以 `.`
-/// 开头时出现(显式引用点文件)。
-fn list_mention_directory(root: &Path, directory: &str, fragment: &str) -> Vec<MentionItem> {
-    let Some(abs) = resolve_relative_directory(root, directory) else {
-        return Vec::new();
-    };
-    let needle = fragment.to_lowercase();
-    let show_hidden = fragment.starts_with('.');
-    // 单目录条目少(上限截断前先全量打分排序即可);basename 一次转小写复用。
-    let mut scored: Vec<(MentionItem, (u8, u8, usize, usize))> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&abs) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !show_hidden && name.starts_with('.') {
-                continue;
-            }
-            let name_lower = name.to_lowercase();
-            let Some((tier, pos, gaps)) = match_basename(&name_lower, &needle) else {
-                continue;
-            };
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let path = format!("{directory}{name}");
-            let kind = if file_type.is_dir() {
-                if MENTION_EXCLUDED_DIRS.contains(&name.as_str()) {
-                    continue;
-                }
-                "directory"
-            } else if file_type.is_file() {
-                "file"
-            } else {
-                continue;
-            };
-            let order = (if kind == "directory" { 0u8 } else { 1u8 }, tier, pos, gaps);
-            scored.push((MentionItem { path, kind }, order));
-        }
-    }
-    scored.sort_by(|a, b| {
-        a.1.cmp(&b.1)
-            .then_with(|| a.0.path.to_lowercase().cmp(&b.0.path.to_lowercase()))
-            .then_with(|| a.0.path.cmp(&b.0.path))
-    });
-    scored.truncate(MENTION_MAX_RESULTS);
-    scored.into_iter().map(|(item, _)| item).collect()
-}
-
-/// 纯 basename 档位(下钻路径用,无全路径档)。
-fn match_basename(name_lower: &str, needle: &str) -> Option<(u8, usize, usize)> {
-    if needle.is_empty() {
-        return Some((TIER_BASENAME_SUBSTRING, 0, 0));
-    }
-    if name_lower.starts_with(needle) {
-        return Some((TIER_PREFIX, 0, 0));
-    }
-    if let Some(pos) = name_lower.find(needle) {
-        return Some((TIER_BASENAME_SUBSTRING, pos, 0));
-    }
-    if let Some((pos, gaps)) = fuzzy_match(name_lower, needle) {
-        return Some((TIER_BASENAME_FUZZY, pos, gaps));
-    }
-    None
-}
-
 /* ---- 工作区文件树(右侧「工作区文件」面板) ----
  *
  * 与上面的 @ 提及候选**分工不同**,所以不复用同一条链路:
- * - 提及候选是"全树索引 + 模糊匹配",要一次给出任意深度的命中;
+ * - 提及候选是"全树索引 + 关键词匹配",要一次给出任意深度的命中;
  * - 文件树是**逐层懒加载**:展开哪层列哪层,首屏只读根目录一次。
  *   大仓库(几万文件)不可能整树灌进浏览器,而懒加载的代价是展开时才读盘,
  *   正好与"用户看哪展开哪"的节奏一致。
@@ -1791,20 +1683,29 @@ mod mention_tests {
     }
 
     #[test]
-    fn empty_query_lists_root_directories_first() {
+    fn empty_query_searches_index_with_shallow_candidates_first() {
         let root = scratch("root");
         std::fs::create_dir(root.join("zeta")).unwrap();
         std::fs::create_dir(root.join("alpha")).unwrap();
         std::fs::write(root.join("beta.txt"), "x").unwrap();
+        std::fs::write(root.join("alpha/nested.txt"), "x").unwrap();
         let items = mentions_impl(root.to_str().unwrap(), "").unwrap();
         let paths: Vec<&str> = items.iter().map(|item| item.path.as_str()).collect();
-        assert_eq!(paths, vec!["alpha", "zeta", "beta.txt"]);
+        assert_eq!(paths, vec!["alpha", "zeta", "beta.txt", "alpha/nested.txt"]);
+        let whitespace = mentions_impl(root.to_str().unwrap(), " \t\n ").unwrap();
+        assert_eq!(
+            paths,
+            whitespace
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(items[0].kind, "directory");
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn slash_query_drills_into_directory() {
+    fn slash_query_searches_all_nested_paths() {
         let root = scratch("drill");
         std::fs::create_dir_all(root.join("src/nested")).unwrap();
         std::fs::write(root.join("src/main.rs"), "").unwrap();
@@ -1812,7 +1713,10 @@ mod mention_tests {
         std::fs::write(root.join("notes.md"), "").unwrap();
         let items = mentions_impl(root.to_str().unwrap(), "src/").unwrap();
         let paths: Vec<&str> = items.iter().map(|item| item.path.as_str()).collect();
-        assert_eq!(paths, vec!["src/nested", "src/main.rs"]);
+        assert_eq!(
+            paths,
+            vec!["src/nested", "src/main.rs", "src/nested/mod.rs"]
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1969,32 +1873,36 @@ mod mention_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// 验收:非连续输入(`sard`)命中 `subagent-redesign.md`(基名模糊档);
-    /// 与之无关的 `other.txt` 不应出现。
     #[test]
-    fn noncontiguous_input_matches_basename_fuzzy() {
+    fn noncontiguous_input_does_not_match() {
         let root = scratch("fuzzy-basename");
         std::fs::write(root.join("subagent-redesign.md"), "").unwrap();
         std::fs::write(root.join("other.txt"), "").unwrap();
         let items = mentions_impl(root.to_str().unwrap(), "sard").unwrap();
-        let paths: Vec<&str> = items.iter().map(|item| item.path.as_str()).collect();
-        assert_eq!(paths, vec!["subagent-redesign.md"]);
+        assert!(items.is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// 档位排序:前缀 > 基名子串 > 基名模糊。
-    /// `red.md`(前缀)排第一;`subagent-redesign.md`(子串)排在
-    /// 只能模糊命中的 `r-e-d.txt` 之前。
     #[test]
-    fn prefix_outranks_substring_outranks_fuzzy() {
+    fn exact_outranks_prefix_outranks_substring_and_directory() {
         let root = scratch("tier-order");
+        std::fs::write(root.join("red"), "").unwrap();
+        std::fs::create_dir(root.join("zzzzzzzzzz-red-directory")).unwrap();
         std::fs::write(root.join("subagent-redesign.md"), "").unwrap();
         std::fs::write(root.join("red.md"), "").unwrap();
         std::fs::write(root.join("r-e-d.txt"), "").unwrap();
         std::fs::write(root.join("momo.txt"), "").unwrap();
         let items = mentions_impl(root.to_str().unwrap(), "red").unwrap();
         let paths: Vec<&str> = items.iter().map(|item| item.path.as_str()).collect();
-        assert_eq!(paths, vec!["red.md", "subagent-redesign.md", "r-e-d.txt"]);
+        assert_eq!(
+            paths,
+            vec![
+                "red",
+                "red.md",
+                "subagent-redesign.md",
+                "zzzzzzzzzz-red-directory"
+            ]
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2012,7 +1920,7 @@ mod mention_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// 大小写不敏感:大写输入同样命中,这是前缀/子串/模糊三档共用的前提。
+    /// 大小写不敏感:大写输入同样命中。
     #[test]
     fn matching_is_case_insensitive() {
         let root = scratch("case-insensitive");
@@ -2023,17 +1931,77 @@ mod mention_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// 下钻路径同样支持模糊:目录 `src/` 内 `mnl` 命中 `manual.txt`。
     #[test]
-    fn drill_down_supports_fuzzy_fragment() {
+    fn slash_query_does_not_match_sparse_characters() {
         let root = scratch("drill-fuzzy");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/manual.txt"), "").unwrap();
         std::fs::write(root.join("src/other.txt"), "").unwrap();
         let items = mentions_impl(root.to_str().unwrap(), "src/mnl").unwrap();
-        let paths: Vec<&str> = items.iter().map(|item| item.path.as_str()).collect();
-        assert_eq!(paths, vec!["src/manual.txt"]);
+        assert!(items.is_empty());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn keywords_match_across_directories_with_and_semantics() {
+        let root = scratch("multi-keyword");
+        std::fs::create_dir_all(root.join("Server/api")).unwrap();
+        std::fs::create_dir_all(root.join("Client/api")).unwrap();
+        std::fs::write(root.join("Server/api/Handler.rs"), "").unwrap();
+        std::fs::write(root.join("Client/api/Handler.rs"), "").unwrap();
+        std::fs::write(root.join("Server/api/Other.rs"), "").unwrap();
+        for query in [
+            " server\tHANDLER \n",
+            "handler server",
+            "server/api handler",
+        ] {
+            let items = mentions_impl(root.to_str().unwrap(), query).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].path, "Server/api/Handler.rs");
+        }
+        assert!(
+            mentions_impl(root.to_str().unwrap(), "server handler missing")
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn chinese_keywords_match_contiguous_text() {
+        let root = scratch("chinese-keywords");
+        std::fs::create_dir_all(root.join("文档/设计")).unwrap();
+        std::fs::write(root.join("文档/设计/用户登录.md"), "").unwrap();
+        let items = mentions_impl(root.to_str().unwrap(), "文档　登录").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].path, "文档/设计/用户登录.md");
+        assert!(
+            mentions_impl(root.to_str().unwrap(), "用录")
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn basename_relevance_beats_path_prefix_and_directory_type() {
+        let entries = vec![
+            IndexedMention::new("main/archive".into(), "directory"),
+            IndexedMention::new("main".into(), "directory"),
+            IndexedMention::new("deep/src/main.rs".into(), "file"),
+            IndexedMention::new("deep/src/domain.rs".into(), "file"),
+        ];
+        let items = filter_mention_entries(&entries, "main");
+        let paths: Vec<_> = items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "main",
+                "deep/src/main.rs",
+                "deep/src/domain.rs",
+                "main/archive"
+            ]
+        );
     }
 
     /// 超量截断仍保留排序靠前的条目:70 个 `red-*.txt` 里只返回前 50 个。

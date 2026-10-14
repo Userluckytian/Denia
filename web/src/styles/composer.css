@@ -57,13 +57,13 @@
   top: calc(100% + 6px);
   left: 0;
   z-index: 41;
-  min-width: 280px;
-  max-width: 420px;
-  background: var(--bg-layer-3);
-  border: 1px solid var(--border-l2);
+  width: min(360px, calc(100vw - 40px));
+  max-width: calc(100vw - 40px);
+  background: var(--composer-surface);
+  border: none;
   border-radius: var(--r-md);
-  box-shadow: var(--shadow-float);
-  padding: 4px;
+  box-shadow: var(--composer-shadow);
+  padding: 6px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -103,6 +103,22 @@
 .ws-menu-item.active {
   background: var(--active-fill);
   color: var(--label-primary);
+}
+
+.ws-menu-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 3px;
+}
+
+.ws-menu-path {
+  color: var(--label-caption);
+  font-size: 11px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .ws-menu-item .name {
@@ -170,17 +186,17 @@
   animation: model-menu-in 0.16s var(--ease);
 }
 
-/* 下钻时的当前位置(q = "src/main" → "src/"),对照 dsh 的面包屑头部。 */
+/* 查询提示保持低强调，不占用候选的视觉层级。 */
 .mention-menu-heading {
+  white-space: normal;
   flex: none;
   padding: 4px 8px 6px;
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
+  text-transform: none;
   color: var(--label-caption);
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -386,6 +402,109 @@
   color: var(--label-primary);
 }
 
+.file-chip {
+  --file-chip-bg: color-mix(in srgb, var(--label-primary) 5%, transparent);
+  display: inline-flex;
+  align-items: center;
+  vertical-align: top;
+  height: 1lh;
+  max-width: min(100%, 320px);
+  position: relative;
+  gap: 5px;
+  padding: 0 5px;
+  margin: 0 1px;
+  isolation: isolate;
+  color: var(--label-primary);
+  font-size: inherit;
+  line-height: inherit;
+  white-space: nowrap;
+  user-select: all;
+  cursor: default;
+}
+
+.file-chip::before {
+  content: '';
+  position: absolute;
+  inset: 3px 0;
+  z-index: -1;
+  border-radius: 4px;
+  background: var(--file-chip-bg);
+}
+
+.file-chip:hover::before {
+  background: var(--hover-fill);
+}
+
+.file-chip-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--label-secondary);
+}
+
+.file-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: inherit;
+  font-size: 0.9em;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+#file-mention-results {
+  padding: 8px;
+  gap: 3px;
+  max-height: 320px;
+}
+
+#file-mention-results .mention-menu-heading {
+  padding: 5px 9px 9px;
+  font-family: inherit;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.6;
+}
+
+#file-mention-results .mention-menu-item {
+  padding: 9px 10px;
+  gap: 11px;
+  border-radius: 6px;
+}
+
+#file-mention-results .mention-menu-item:focus-visible {
+  outline: 2px solid var(--label-secondary);
+  outline-offset: -2px;
+}
+
+#file-mention-results .mention-menu-icon {
+  width: 26px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  color: var(--label-secondary);
+}
+
+#file-mention-results .mention-menu-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+#file-mention-results .mention-menu-text {
+  gap: 3px;
+}
+
+#file-mention-results .mention-menu-name {
+  font-family: inherit;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+#file-mention-results .mention-menu-parent {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--label-caption);
+}
+
 /* 优化进行中:输入框银光呼吸,锁定编辑状态。卡片没有边框,银光直接叠在
    常态阴影之上(末项仍是 --composer-shadow,底色与极淡轮廓不丢)。 */
 .prompt-panel.optimizing {
@@ -462,8 +581,7 @@
   gap: 4px;
   max-width: min(320px, 70vw);
   height: 28px;
-  /* 右侧不留内边距:chevron 之后直接衔接强度控件,两个 chip 读作一组 */
-  padding: 0 2px 0 8px;
+  padding: 0 8px;
   border: none;
   border-radius: 999px;
   background: transparent;
@@ -507,8 +625,7 @@
 
 .effort-control {
   position: relative;
-  /* 紧贴模型 chip:两个控件同属"模型"这一组,不留大缝。 */
-  margin-left: -6px;
+  margin-left: 0;
 }
 
 .effort-control.open {
@@ -520,8 +637,7 @@
   align-items: center;
   gap: 4px;
   height: 28px;
-  /* 左侧不留内边距,与模型 chip 的 chevron 紧邻 */
-  padding: 0 6px 0 4px;
+  padding: 0 8px;
   border: none;
   border-radius: 999px;
   background: transparent;
@@ -566,9 +682,9 @@
 .effort-chip-static {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   height: 28px;
-  padding: 0 6px;
+  padding: 0 8px;
   color: var(--label-tertiary);
   font-size: 13px;
   font-weight: 500;

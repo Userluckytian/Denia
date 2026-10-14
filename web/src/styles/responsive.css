@@ -452,9 +452,10 @@
 }
 /* 右端:模型 → 思考强度 → 优化 → 上下文 → 发送。整组贴右,顺序即链路。 */
 .composer-right {
+  --composer-control-gap: 6px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--composer-control-gap);
   margin-left: auto;
   flex: none;
   min-width: 0;
@@ -462,6 +463,7 @@
 .composer-model-group {
   display: flex;
   align-items: center;
+  gap: 4px;
   min-width: 0;
   max-width: 100%;
   padding: 0;

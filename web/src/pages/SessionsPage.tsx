@@ -33,15 +33,14 @@ import { PlanReviewPanel } from '../components/PlanReviewPanel';
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
-import { IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand } from '../components/icons';
+import { IconWorkspace, IconCheck, IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
 import { useStickToBottom } from '../hooks/useStickToBottom';
 import { useContainedWheel } from '../hooks/useContainedWheel';
 
 import { collectSkillTokens, parseLeadingCommand } from './slash';
-import { selectRange, selectionOffsetsIn, serializeEditor, setCaretOffset } from './editor';
-import { formatFileMention } from './mention';
-import { insertReferenceAt, REFERENCE_MIME } from '../fileTree';
+import { insertFileChip, selectionOffsetsIn, serializeEditor, setCaretOffset } from './editor';
+import { REFERENCE_MIME } from '../fileTree';
 import { applyTotalsEvent, emptyTotals, formatTokens, resetTotals, totalsFromPage, type TotalsAccumulator } from '../stats';
 import { TodoPanel } from '../components/TodoPanel';
 import { GoalBar } from '../components/GoalBar';
@@ -234,7 +233,7 @@ export default function SessionsPage({
   const contextWorkspacePath = activeId ? activeSession?.cwd ?? null : activeWs?.path ?? null
   const mentionCwd = activeSession?.cwd_alive === false ? null : contextWorkspacePath
   const { mentionOpen, mentionItems, mentionLoading, mentionQuery, mentionActive, setMentionActive,
-    mentionMenuRef, mentionDir, closeMention, refreshMentions, pickMention } = useComposerMentions({
+    mentionMenuRef, closeMention, refreshMentions, pickMention } = useComposerMentions({
       mentionCwd, promptRef, onDraftChange, syncPromptHeight,
     })
   const { slashOpen, slashItems, slashActive, setSlashActive, slashMenuRef, skillEntries,
@@ -505,18 +504,13 @@ export default function SessionsPage({
 
   const insertContextFile = (candidate: api.MentionCandidate) => {
     const editor = promptRef.current
-    const reference = formatFileMention(candidate, false)
-    if (!editor || !reference) return
+    if (!editor) return
     const draft = serializeEditor(editor)
     const start = Math.min(contextSelectionRef.current.start, draft.length)
     const end = Math.min(contextSelectionRef.current.end, draft.length)
-    const { text, caret } = insertReferenceAt(draft.slice(0, start) + draft.slice(end), start, reference)
-    const inserted = text.slice(start, caret)
     editor.focus({ preventScroll: true })
-    selectRange(editor, start, end)
-    document.execCommand('insertText', false, inserted)
+    if (!insertFileChip(editor, candidate, start, end)) return
     onDraftChange(serializeEditor(editor))
-    setCaretOffset(editor, caret)
     syncPromptHeight()
     closeMention()
     closeSlash()
@@ -847,6 +841,24 @@ export default function SessionsPage({
     },
     [ensureVision, readFileAsDataUrl, optimizing],
   )
+
+  const onEditorCopy = (event: ClipboardEvent<HTMLDivElement>, cut = false) => {
+    const editor = promptRef.current
+    const selection = window.getSelection()
+    if (!editor || !selection?.rangeCount || selection.isCollapsed) return
+    const range = selection.getRangeAt(0)
+    if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) return
+    const fragment = document.createElement('div')
+    fragment.append(range.cloneContents())
+    event.preventDefault()
+    event.clipboardData.setData('text/plain', serializeEditor(fragment))
+    if (cut && editor.isContentEditable) {
+      document.execCommand('delete')
+      onDraftChange(serializeEditor(editor))
+      syncPromptHeight()
+      refreshMenus()
+    }
+  }
 
   /** 编辑器粘贴:图片走识图流程,其余一律降级纯文本(保持节点结构纪律)。 */
   const onEditorPaste = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -1694,8 +1706,9 @@ export default function SessionsPage({
         return
       }
       // 弹层打开时 Enter/Tab 优先选择候选,不发送。
-      if ((event.key === 'Tab' || event.key === 'Enter') && count > 0) {
+      if (event.key === 'Tab' || event.key === 'Enter') {
         event.preventDefault()
+        if (mentionLoading || count === 0) return
         const target = mentionItems[Math.min(mentionActive, count - 1)]
         if (target) pickMention(target)
         return
@@ -1779,7 +1792,7 @@ export default function SessionsPage({
           else setWsMenuOpen((open) => !open)
         }}
       >
-        <IconFolder size={14} />
+        <IconWorkspace size={16} />
         <span className={activeWs ? 'label' : 'label dim'}>
           {activeWs?.title ?? t('heroChooseWorkspace')}
         </span>
@@ -1814,8 +1827,12 @@ export default function SessionsPage({
                     onSelectWorkspace(ws)
                   }}
                 >
-                  <IconFolder size={13} />
-                  <span className="name">{ws.title}</span>
+                  <IconWorkspace size={18} />
+                  <span className="ws-menu-text">
+                    <span className="name">{ws.title}</span>
+                    <span className="ws-menu-path">{ws.path}</span>
+                  </span>
+                  {ws.id === activeWs?.id && <IconCheck size={13} />}
                 </button>
               )
             })}
@@ -1912,6 +1929,9 @@ export default function SessionsPage({
           suppressContentEditableWarning
           role="textbox"
           aria-multiline="true"
+          aria-autocomplete="list"
+          aria-controls={mentionOpen ? 'file-mention-results' : undefined}
+          aria-activedescendant={mentionOpen && !mentionLoading && mentionItems.length > 0 ? `file-mention-option-${mentionActive}` : undefined}
           aria-label={inert ? t('heroChooseWorkspace') : t('chatPlaceholder')}
           aria-readonly={inert || optimizing || !composerReady}
           data-placeholder={
@@ -1943,6 +1963,8 @@ export default function SessionsPage({
             if (el) onDraftChange(serializeEditor(el))
             refreshMenus()
           }}
+          onCopy={onEditorCopy}
+          onCut={(event) => onEditorCopy(event, true)}
           onPaste={onEditorPaste}
           onDragOver={onEditorDragOver}
           onDrop={onEditorDrop}
@@ -1957,11 +1979,13 @@ export default function SessionsPage({
           <div className="menu-backdrop" onClick={closeMention} />
           <div
             className="mention-menu"
+            id="file-mention-results"
             role="listbox"
+            aria-busy={mentionLoading}
             aria-label={t('mentionAria')}
             ref={mentionMenuRef}
           >
-            {mentionDir && <div className="mention-menu-heading">{mentionDir}</div>}
+            <div className="mention-menu-heading">{t('mentionSearchHint')}</div>
             {mentionLoading ? (
               <div className="mention-menu-empty">
                 <IconSpinner size={12} />
@@ -1981,6 +2005,8 @@ export default function SessionsPage({
                 return (
                   <button
                     key={`${item.kind}:${item.path}`}
+                    id={`file-mention-option-${index}`}
+                    title={item.path}
                     type="button"
                     role="option"
                     aria-selected={active}

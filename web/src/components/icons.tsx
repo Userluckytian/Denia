@@ -1,6 +1,7 @@
 /** Minimal inline-SVG icon set, 16px grid, currentColor. */
 
 import type { ReactNode } from 'react'
+export { IconSettingsPresets as IconAgentPreset } from './SettingsIcons'
 
 import { COMMAND_GLYPHS } from '../lib/slashGlyphs'
 
@@ -126,12 +127,14 @@ export function IconWrite(props: IconProps) {
   )
 }
 
-/** 思考：对称脑形轮廓与两处内折，减少小尺寸下的零碎细节。 */
+/** 思考：对称脑形，简化脑回以保持小尺寸留白。 */
 export function IconThink(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <path d="M8 4a2 2 0 0 0-3.9-.6 2.5 2.5 0 0 0-1.8 3.9 2.75 2.75 0 0 0 1.2 4.8A2.25 2.25 0 0 0 8 12V4Zm0 0a2 2 0 0 1 3.9-.6 2.5 2.5 0 0 1 1.8 3.9 2.75 2.75 0 0 1-1.2 4.8A2.25 2.25 0 0 1 8 12" />
-      <path d="M4 6.5c1.1 0 1.75.65 1.75 1.75M12 6.5c-1.1 0-1.75.65-1.75 1.75" />
+      <g transform="scale(.8)" strokeWidth="1.4">
+        <path d="M10 5a2.5 2.5 0 0 0-5 0v.5a3 3 0 0 0-2 5.2V12a3 3 0 0 0 3 3 2 2 0 0 0 4 0V5Zm0 0a2.5 2.5 0 0 1 5 0v.5a3 3 0 0 1 2 5.2V12a3 3 0 0 1-3 3 2 2 0 0 1-4 0" />
+        <path d="M5 8a2 2 0 0 1 2 2m8-2a2 2 0 0 0-2 2" />
+      </g>
     </StrokeSvg>
   )
 }
@@ -563,59 +566,38 @@ export function IconPanelOpen(props: IconProps) {
 export function IconFolderPlus(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <path d="M14 8V5.75c0-.69-.56-1.25-1.25-1.25h-5.5L5.75 3h-2.5C2.56 3 2 3.56 2 4.25v7.5c0 .69.56 1.25 1.25 1.25h4M2 6h12M11.5 9v5M9 11.5h5" />
+      <path transform="scale(.8)" strokeWidth="1.4" d="M2.5 6V4.5h6l2 2h7V10M2.5 6v10.5H10M14.5 12v6m-3-3h6" />
     </StrokeSvg>
   )
 }
 
-/** 展开全部工作区(多层折线张开)。 */
+/** 层叠工作区与向下折线。 */
 export function IconExpandAll(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <path d="m4.5 5.5 3.5-3 3.5 3M4.5 10.5l3.5 3 3.5-3M5 8h6" />
+      <path transform="scale(.8)" strokeWidth="1.4" d="M4 3.5h12M4 7h12M6 11.5l4 4 4-4" />
     </StrokeSvg>
   )
 }
 
-/** 收起全部工作区(多层折线合拢)。 */
+/** 层叠工作区与向上折线。 */
 export function IconCollapseAll(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <path d="m4.5 2.5 3.5 3 3.5-3M4.5 13.5l3.5-3 3.5 3M5 8h6" />
+      <path transform="scale(.8)" strokeWidth="1.4" d="M4 3.5h12M4 7h12M6 15.5l4-4 4 4" />
     </StrokeSvg>
   )
 }
 
-/** agent preset(组装模式):三块咬合成一体 —— 一块居中压在两块的接缝上,
-    读作"这个会话由哪些部件装成"。刻意不复用星芒(那是提示词优化,见
-    IconSparkles),也不复用齿轮/滑块(设置与模型);三者会同屏出现在新会话页。 */
-export function IconAgentPreset(props: IconProps) {
-  return (
-    <Svg {...props}>
-      {/* 底座两块:留出 1.2 的中缝,让上面那块有位置 */}
-      <rect x="2.6" y="8.5" width="4.8" height="4.4" rx="1.3" stroke="currentColor" strokeWidth="1.2" />
-      <rect x="8.6" y="8.5" width="4.8" height="4.4" rx="1.3" stroke="currentColor" strokeWidth="1.2" />
-      {/* 顶上那块:跨在接缝上方,间距 1.0(收紧到一个整体,不散成三颗点) */}
-      <rect x="5.6" y="3.1" width="4.8" height="4.4" rx="1.3" stroke="currentColor" strokeWidth="1.2" />
-    </Svg>
-  )
-}
-
-/** 提示词优化:魔法/星芒,表示“优化”。 */
+/** 优化：一主一次的双星芒，共用细描边。 */
 export function IconSparkles(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path
-        d="M6 2.5 7 5.2l2.7 1-2.7 1-1 2.7-1-2.7-2.7-1 2.7-1L6 2.5Z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-      <path
-        d="m11.8 9.6.55 1.45 1.45.55-1.45.55-.55 1.45-.55-1.45-1.45-.55 1.45-.55.55-1.45Z"
-        fill="currentColor"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <g transform="scale(.8)" strokeWidth="1.4">
+        <path d="M7 2.5 8.6 6.4 12.5 8 8.6 9.6 7 13.5 5.4 9.6 1.5 8 5.4 6.4 7 2.5Z" />
+        <path d="m14.5 11 1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1 1-2.5Z" />
+      </g>
+    </StrokeSvg>
   )
 }
 

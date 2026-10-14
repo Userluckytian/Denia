@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject, type
 import * as api from '../../api'
 import { t } from '../../i18n'
 import { activeSlashToken } from '../../pages/slash'
-import { caretOffsetAtPoint, caretOffsetIn, caretRightAfterChip, createSlashChip, renderDraft, selectRange, serializeEditor, setCaretOffset, type SlashChipKind } from '../../pages/editor'
-import { REFERENCE_MIME, decodeReference, insertReferenceAt, referenceText } from '../../fileTree'
+import { caretOffsetAtPoint, caretOffsetIn, caretRightAfterChip, createSlashChip, insertFileChip, renderDraft, selectRange, serializeEditor, setCaretOffset, type SlashChipKind } from '../../pages/editor'
+import { REFERENCE_MIME, decodeReference } from '../../fileTree'
 
 interface Options {
   activeId: string | null
@@ -82,20 +82,20 @@ export function useComposerSlash({ activeId, inert, prompt, promptRef, setPrompt
       const payload = decodeReference(raw)
       if (!payload) return
       event.preventDefault()
-      const reference = referenceText(payload)
-      if (!reference) return
       const el = promptRef.current
       if (!el) return
       const draft = serializeEditor(el)
       const at = caretOffsetAtPoint(el, event.clientX, event.clientY) ?? draft.length
-      const { text, caret } = insertReferenceAt(draft, at, reference)
-      applyDraft(text)
-      setCaretOffset(el, caret)
+      if (!insertFileChip(el, payload, at, at)) return
+      setPrompt(serializeEditor(el))
+      setOptimizedPrompt(null)
+      originalPromptRef.current = ''
+      syncPromptHeight()
       closeMention()
       closeSlash()
       el.focus()
     },
-    [applyDraft, closeMention, closeSlash],
+    [closeMention, closeSlash],
   )
 
   /** 检测光标处 `/` token 并按词典出候选(同步,无网络);@ 提及优先,二者互斥。 */

@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict'
+import { build } from 'esbuild'
+const { outputFiles } = await build({ entryPoints: ['src/pages/mention.ts'], bundle: true, write: false, format: 'esm', platform: 'node' })
+const { activeAtToken, formatFileMention } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`)
+const active = (text) => activeAtToken(text, text.length)
+assert.deepEqual(active('查找 @src button component'), { prefix: '@src button component', query: 'src button component', quoted: false })
+assert.equal(active('user@host'), undefined)
+assert.equal(active('@"foo bar"'), undefined)
+assert.equal(active('@"foo\nbar'), undefined)
+assert.equal(active('@foo\nbar'), undefined)
+assert.equal(active('@foo @bar baz').query, 'bar baz')
+assert.equal(active('@"foo bar').query, 'foo bar')
+assert.equal(formatFileMention({ path: 'foo bar', kind: 'directory' }, false), '@"foo bar/"')
+assert.equal(formatFileMention({ path: 'src/', kind: 'directory' }, false), '@src/')
+assert.equal(formatFileMention({ path: 'src', kind: 'directory' }, true), '@"src/"')
+assert.equal(formatFileMention({ path: 'a"b', kind: 'file' }, false), undefined)
+assert.equal(formatFileMention({ path: 'a\nb', kind: 'file' }, false), undefined)
+console.log('ALL PASS: mention multi-keyword queries and closed references')
